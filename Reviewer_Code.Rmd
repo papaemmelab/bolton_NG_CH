@@ -1,0 +1,3741 @@
+---
+title: "Code for Analyses"
+author: "Kelly Bolton"
+date: "6/16/2020"
+output: html_document
+---
+---
+title: "Oncologic Therapy Shapes the Fitness Landscape of Clonal Hematopoeisis.rmd"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(magrittr)
+library(ggplot2)
+library(reshape2)
+library(RColorBrewer)
+library(ggpubr)
+library(gridGraphics)
+library(ggsci)
+library(ggsignif)
+library(grid)
+library(kableExtra)
+library(ggrepel)
+library(sjPlot)
+library(sjlabelled)
+library(sjmisc)
+library(forcats)
+library(survival)
+library(survminer)
+library(ggplotify)
+library(patchwork)
+library(geepack)
+library(scales)
+library(table1)
+library(svglite)
+library(magick)
+library(iCARE)
+
+options(na.action = "na.omit")
+source('toolbox.R')
+source('get_chemo_features.R')
+knitr::opts_chunk$set(message = FALSE)
+
+#BiocManager::install("iCARE")
+```
+
+```{r}
+#Input data
+M_long = suppressWarnings(data.table::fread('M_long.txt', sep = '\t', header = T))  %>% as.data.frame()
+M_wide_all = suppressWarnings(data.table::fread('M_wide_all.txt', sep = '\t', header = T))  %>% as.data.frame()
+M2_all = suppressWarnings(data.table::fread('M2_all.txt', sep = '\t', header = T))  %>% as.data.frame()
+M_tmn_wide_st = suppressWarnings(data.table::fread('M_tmn_wide_st.txt', sep = '\t', header = T))  %>% as.data.frame()
+M_tmn_h = suppressWarnings(data.table::fread('M_tmn_h.txt', sep = '\t', header = T))  %>% as.data.frame()
+M_tmn_long = suppressWarnings(data.table::fread('M_tmn_long.txt', sep = '\t', header = T))  %>% as.data.frame()
+P_serial = suppressWarnings(data.table::fread('P_serial.txt', sep = '\t', header = T))  %>% as.data.frame()
+
+T_seer = read_tsv('breast_prop_chemo.txt', col_types = cols()) 
+tmn_inc = read_tsv('CumIncByYear-20190716_KB_Wolff.txt', col_types = cols()) %>%
+    dplyr::select(Year, yearly_inc) %>% as.data.frame %>% unname %>% as.matrix
+mort_inc = read_tsv('overall_mort_50_75.txt', col_types = cols()) %>%
+    dplyr::select(time, year_inc) %>% as.data.frame %>% unname %>% as.matrix
+
+class_dict <- read.csv("chemoclass_jan2019_revised.csv", stringsAsFactors = F)
+drugsets_dict <- read.csv("top_sets_dec2018.csv", header = T, stringsAsFactors = F)
+class_dict <- class_dict %>% filter(drugclass_c=="cytotoxic_therapy")
+    
+```
+
+```{r global theme, include=FALSE}
+## Plot settings
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "none",
+    plot.subtitle = element_text(hjust = 0.5, size = 8),
+    plot.title = element_text(face = 'bold', hjust = 0, vjust = -2, size = 12),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    axis.title = element_text(size = 8),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+therapy_colors = c('untreated' = '#0072B2', 'treated' = '#D55E00')
+
+do_plot = function(p, f, w, h, r = 300, save_pdf = T) {
+  ggsave(f, plot = p, width = w, height = h, dpi = r)
+  if (save_pdf) {
+    ggsave(paste0(str_remove(f, '\\..+'), '.pdf'), plot = p, width = w, height = h, dpi = r)
+  }
+  knitr::include_graphics(f)
+}
+
+display_kable = function(kable, file = 'test.pdf')  {
+  
+  kable %>% save_kable(file = file)
+
+  kable %>% as_image()
+    
+}
+
+th <- theme_classic()
+th <- th + theme(axis.text = element_text(color = "black"))
+theme_set(th)
+```
+##Process dataframes a bit
+```{r}
+M_wide_all = M_wide_all %>%
+    mutate(race_b = as.integer(race == "White")
+    ) %>%
+    mutate(age_scaled = as.vector(scale(age)),
+    age_d=age/10,
+    ) %>%
+    mutate(mutnum_all_r = case_when(
+        mutnum_all ==0 ~ 0,
+        mutnum_all == 1 ~ 1,
+        mutnum_all >= 2 ~ 2)
+    ) %>%
+    mutate(smoke_bin=case_when(
+        smoke==0 ~ 0,
+        smoke==1 ~ 1,
+        smoke==2 ~ 1)
+    ) %>%
+    mutate(
+        Gender = relevel(factor(Gender), ref = 'Male'),
+        race = relevel(factor(race), "White"),
+        smoke = relevel(factor(smoke), "0"),
+        smoke_bin = relevel(factor(smoke_bin), "0"),
+        therapy_binary = relevel(factor(therapy_binary), 'untreated')
+    )
+
+M_long = M_long %>%
+    mutate(race_b = as.integer(race == "White")
+    ) %>%
+    mutate(age_scaled = as.vector(scale(age)),
+    age_d=age/10,
+    ) %>%
+    mutate(smoke_bin=case_when(smoke==0 ~ 0,
+                               smoke==1 ~ 1,
+                               smoke==2 ~ 1)
+    ) %>%
+    mutate(
+        Gender = relevel(factor(Gender), ref = 'Male'),
+        race = relevel(factor(race), "White"),
+        smoke = relevel(factor(smoke), "0"),
+        smoke_bin = relevel(factor(smoke_bin), "0"),
+        therapy_binary = relevel(factor(therapy_binary), 'untreated')
+    )
+
+M_tmn_wide_st <- M_tmn_wide_st %>%
+    mutate(age_d=age/10)
+
+cbc_vars = c("wbc", "anc", "alc", "amc", "hgb", "mcv", "rdw", "plt")
+M_tmn_wide_st = M_tmn_wide_st %>% mutate_at(.funs = funs(c = scale), .vars = cbc_vars)
+
+ddr_genes = c('PPM1D', 'TP53', 'CHEK2')
+
+M2_all <- M2_all %>%  mutate(ddr_CH = Gene %in% ddr_genes)
+
+# separate out singletons from serial sampling cohort
+M2 = M2_all %>% filter(VAF_1 > 0 & VAF_2 > 0)
+M2_single = M2_all %>% filter(VAF_1 == 0 | VAF_2 == 0)
+
+#Define wide data frame with treatment known
+M_wide <- M_wide_all %>% filter(therapy_known==1)
+
+#Define long dataframe with non-synonomous and treatment know only
+M = M_long %>% filter((therapy_known == 1) & CH_nonsilent == 1)
+```
+
+#Tabulate main cohort numbers
+```{r}
+print('All mutations')
+nrow(M_long)
+print('# of Patients')
+nrow(M_wide_all)
+print('# of positive patients')
+unique(M_long$STUDY_ID) %>% length()
+print('proportion of Patients CH positive')
+sum(M_wide_all$CH_all)/nrow(M_wide_all)
+print('# of CH-PD mutations')
+sum(M_long$ch_pancan_pd)
+print('# of CH-my-PD mutations')
+sum(M_long$ch_my_pd)
+print('table of mutations')
+table(M_wide_all$mutnum_all_r)
+print('# pts with therapy')
+table(M_wide$therapy_binary)
+```
+
+## Main figures
+# Figure 1 - mutational characteristics
+```{r}
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 8),
+    plot.title = element_text(face = 'bold', size = 12, hjust = 0, vjust = -11),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    axis.title = element_text(size = 8),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+age_groups = c("0-10", "11-20", "21-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81-90", "91-100")
+
+get_ch_grouped = function(M_wide, CI = T) {
+
+    CH_by_age_grouped = M_wide %>% select(STUDY_ID, age_cat, CH) %>%
+        mutate(CH = ifelse(is.na(CH), 0, CH)) %>%
+        group_by(age_cat) %>%
+        summarise(CH = sum(CH), total = n()) %>% 
+        filter(!is.na(age_cat)) %>%
+        mutate(freq = CH / total)
+    
+    if (CI) {
+        CH_by_age_grouped = CH_by_age_grouped %>%
+        cbind(
+            apply(CH_by_age_grouped, 1, function(row) {
+                CI = prop.test(row['CH'], row['total'], conf.level=0.95)$conf.int[1:2]
+                return(c(lower = CI[1], upper = CI[2]))
+            }) %>% t
+        )
+    }
+    
+    return(CH_by_age_grouped)
+}
+
+font_size = 8
+age_curve_theme = 
+  theme(
+      legend.position = 'top',
+      legend.key.size = unit(5, 'mm'),
+      legend.title = element_blank(),
+      legend.direction = 'horizontal',
+      plot.title = element_text(hjust = -0.08),
+      axis.text.x = element_text(angle = 45, vjust = 0.5, size = font_size),
+      axis.text.y = element_text(size = font_size),
+      axis.title = element_text(size = font_size),
+      legend.text = element_text(size = font_size)
+  )
+
+## Histogram by gene frequency
+gene_list = M %>% count(Gene) %>% arrange(-n) %>% .$Gene %>% unique %>% .[1:10]
+
+n_treated = M_wide %>% count(therapy_binary) %>% filter(therapy_binary == 'treated') %>% pull(n)
+n_untreated = M_wide %>% count(therapy_binary) %>% filter(therapy_binary == 'untreated') %>% pull(n)
+
+# tally
+D = M %>% 
+    filter(CH_nonsilent == 1) %>%
+    reshape2::dcast(
+        formula = Gene + therapy_binary ~ .,
+        value.var = 'STUDY_ID',
+        fun.aggregate = function(STUDY_IDs) {length(unique(STUDY_IDs))}
+    ) %>%
+    dplyr::rename("n_patient" = ".") %>%
+    mutate(
+        prop_patient = case_when(
+            therapy_binary == 'treated' ~ n_patient/n_treated,
+            therapy_binary == 'untreated' ~ n_patient/n_untreated
+        )
+    ) %>%
+    filter(Gene %in% gene_list) %>%
+    mutate(
+        Gene = factor(Gene, gene_list),
+        therapy_binary = factor(therapy_binary, c('untreated', 'treated'))
+    ) %>%
+    arrange(Gene)
+
+# need to test for ch_nonsilent, the gene columns in M_wide are ch_pancan_pd
+asterisks = lapply(gene_list, 
+    function(gene) {
+        model = glm(
+            formula = paste0(gene, ' ~ age_scaled + smoke_bin + race_b + Gender + therapy_binary'),
+            data = M_wide,
+            family = "binomial")
+        treatment_pval = model %>% summary %$% coefficients %>% .['therapy_binarytreated', 'Pr(>|z|)']
+        treatment_qval = p.adjust(treatment_pval, method = 'fdr', n = length(gene_list))
+        return(signif.num(treatment_qval, ns = F))
+    }
+)
+
+p_hist = ggplot(
+      D,
+      aes(x = Gene, y = prop_patient, fill = therapy_binary)
+  ) +
+  geom_bar(stat = 'identity', position = "dodge", color = 'black', size = 0.25) +
+  panel_theme +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.title = element_blank(),
+      legend.key.size = unit(5, 'mm'),
+      legend.position = 'top',
+      legend.direction = 'horizontal',
+      axis.title = element_text(size = font_size),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = font_size),
+      legend.text = element_text(size = font_size)
+  ) +
+  annotate('text', x = gene_list, y = 0.11, label = asterisks, size = 4) +
+  ylab("Proportion with mutated Gene") +
+  xlab('') +
+  scale_fill_manual(values = therapy_colors) +
+  scale_color_manual(values = therapy_colors)
+
+## stacked bar
+mycols = c(
+    brewer.pal(9, "YlOrBr") %>% rev %>% .[1:3] %>% rev,
+    brewer.pal(9, "YlOrRd") %>% .[2:5],
+    brewer.pal(9, "Blues") %>% rev
+)
+
+spliceosome_genes = c('SF3B1', 'SRSF2', 'U2AF1')
+
+D = M %>% 
+    mutate(
+      age_bins = case_when(
+        age < 40 ~ 1,
+        age < 65 ~ 2,
+        age < 75 ~ 3,
+        age >= 75 ~ 4)
+    ) %>%
+    group_by(age_bins) %>%
+    mutate(age_bounds = paste0(round(min(age), 0), '-', round(max(age), 0))) %>%
+    ungroup() %>%
+    mutate(age_bins = age_bounds) %>%
+    mutate(Gene = as.character(Gene)) %>%
+    group_by(Gene) %>%
+    mutate(freq = n()) %>%
+    ungroup() %>%
+    mutate(
+        Gene = ifelse(freq > 50 | Gene %in% spliceosome_genes | Gene %in% ddr_genes, Gene, 'Other')
+    ) %>%
+    arrange(Gene == 'Other', !(Gene %in% spliceosome_genes), !(Gene %in% ddr_genes), freq) %>%
+    mutate(Gene = factor(Gene, levels = unique(Gene))) %>%
+    count(age_bins, therapy_binary, Gene) %>%
+    group_by(age_bins, therapy_binary) %>%
+    mutate(
+        total = sum(n),
+        prop = n/sum(n)
+    ) %>%
+    ungroup()
+
+p_stack = ggplot(
+      D,
+      aes(x = age_bins, y = prop, fill = Gene)
+  ) +
+  geom_bar(stat = 'identity', size = 0) +
+  panel_theme +
+  theme(
+    legend.title = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = 'white', color = 'white'),
+    axis.text.y = element_text(size = font_size),
+    axis.text.x = element_text(size = font_size, angle = 45, hjust = 1),
+    legend.text = element_text(size = font_size/1.5),
+    legend.key.size = unit(3, "mm"),
+    axis.title = element_text(size = font_size),
+    legend.position = 'top'
+  ) + 
+  facet_wrap(~therapy_binary) +
+  ylab('Proportion of patients') +
+  xlab('Age') +
+  scale_fill_manual(values = mycols)
+
+## forest plot
+DTA = c('DNMT3A', 'TET2', 'ASXL1')
+DDR = c('PPM1D', 'TP53', 'CHEK2')
+SPL = c('SF3B1', 'SRSF2')
+OTH = c('JAK2', 'ATM')
+
+gene_list = c(DDR, DTA, SPL, OTH)
+
+#ALL adjusted for treatment
+logit_gene_var = list()
+
+for (gene in gene_list) {
+    logit = glm(
+        formula = get(gene) ~ age_scaled + smoke_bin + race_b + Gender + therapy_binary,
+        data = M_wide,
+        family = "binomial")
+    logit_data = logit %>% sjPlot::get_model_data(type="est") %>% cbind(Gene = gene)
+    logit_gene_var = rbind(logit_gene_var, logit_data)
+}
+
+# for each gene
+D = logit_gene_var %>%
+    filter(!term %in% c("GenderFemale", "race_b")) %>%
+    mutate(
+        term = c(
+            'therapy_binarytreated' = 'Therapy',
+            'smoke_bin1' = 'Smoking',
+            'age_scaled' = 'Age'
+        )[as.character(term)]
+    ) %>%
+    mutate(term = factor(term, c("Age", "Therapy", "Smoking"))) %>%
+    mutate(p_fdr = p.adjust(p.value, method = "fdr")) %>%
+    mutate(termGene = paste0(term, Gene)) %>%
+    arrange(estimate, Gene) %>%
+    mutate(termGene = factor(termGene, levels = termGene)) %>%
+    mutate(gene_cat = case_when(
+        Gene %in% DTA ~ 'DTA', 
+        Gene %in% DDR ~ 'DDR', 
+        Gene %in% SPL ~ 'Splicing', 
+        T ~ 'Other'
+      )
+    ) %>% 
+    mutate(gene_cat = factor(gene_cat, c('DDR', 'DTA', 'Splicing', 'Other'))) %>%
+    mutate(
+        q.value = p.adjust(p.value, n = nrow(.), method = 'fdr'),
+        q.label = paste0(signif(estimate, 2), signif.num(q.value)),
+        q.star = signif.num(q.value)
+    )
+
+p_forest = plot_forest(
+      D,
+      x = "termGene",
+      label = 'q.star',
+      eb_w = 0,
+      eb_s = 0.3,
+      ps = 1.5,
+      or_s = 2,
+      nudge = -0.3,
+      col = 'gene_cat'
+  ) + 
+  facet_wrap(~term, scale = 'free_y', ncol = 1) +
+  scale_x_discrete(
+      breaks = D$termGene,
+      labels = D$Gene,
+      expand = c(0.1,0)
+  ) +
+  xlab('') + ylab('Odds Ratio of CH-PD') +
+  scale_color_nejm() +
+  panel_theme +
+  theme(
+    axis.text = element_text(size = font_size),
+    axis.title = element_text(size = font_size),
+    strip.text = element_text(size = font_size),
+    legend.position = 'top',
+    legend.title = element_blank(),
+    legend.text = element_text(size = font_size/1.2),
+    legend.key.size = unit(3, "mm")
+  ) 
+
+combo = ((p_hist + labs(title = 'A')) / (p_stack + labs(title = 'B'))) | (p_forest+ labs(title = 'C'))
+
+do_plot(combo, "fig1.png", 10, 6, save_pdf = T)
+```
+
+#Figure 2 - therapy and genes
+```{r}
+#Plotting theme
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 8),
+    plot.title = element_text(face = 'bold', hjust = 0, vjust = -2, size = 12),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    axis.title = element_text(size = 8),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+interest_drugs = c("XRT", "ind_platinum", 
+    "ind_topoisomerase_ii_inh", "ind_taxane", "ind_topoisomerase_i_inhi",
+    "ind_antimetabolite", "ind_microtubule_damaging", "ind_radiotherapy")
+
+interest_genes = c("PPM1D","TP53","CHEK2","DNMT3A","TET2","ASXL1","ATM")
+
+D = lapply(
+        interest_genes,
+        function (gene) {
+
+            terms = filter_terms(
+                M_wide %>% filter(get(gene) == 1),
+                interest_drugs,
+                verbose = F,
+                threshold = 10
+            )
+
+            if (length(terms) == 0) {
+                return(NULL)
+            }
+
+            formula = paste0(
+                gene, ' ~ ',
+                paste(terms, collapse = ' + '),
+                ' + XRT + age + smoke_bin + race_b + timedx_impact')
+            
+            glm(formula = formula, data = M_wide, family = "binomial", na.action = 'na.omit') %>%
+                sjPlot::get_model_data(type="est") %>% cbind(Gene = gene)
+        }
+    ) %>%
+    Reduce(rbind, .) %>%
+    dplyr::filter(term %in% c(interest_drugs) & Gene %in% interest_genes) %>%
+    mutate(
+        term = factor(format_variable(term), format_variable(interest_drugs)),
+        Gene = factor(Gene, interest_genes)
+    ) %>%
+    mutate(p_fdr = p.adjust(p.value, method = "fdr")) %>%
+    rowwise() %>%
+    mutate(log_or = log(estimate)) %>%
+    ungroup()
+
+p_heatmap = ggplot(
+        D,
+        aes(x = term, y = Gene, fill = log_or)
+    ) +
+    geom_tile(color = "lightgrey") +
+    scale_fill_gradient2(
+        low = "darkblue",
+        mid = "white",
+        high = "darkred", 
+        midpoint = 0, 
+        na.value = "white",
+        limits = c(-2.5, 2.5)
+        
+    ) +
+    geom_point(
+        aes(size = ifelse(p_fdr <= 0.05, 1, NA)),
+        shape = 8, 
+        colour = "black",
+        show.legend = F
+    ) +
+    scale_size_area(max_size = 2) +
+    xlab('') +
+    ylab('') +
+    panel_theme +
+    scale_y_discrete(expand = c(0,0)) +
+    scale_x_discrete(expand = c(0,0)) +
+    theme(
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'right',
+        axis.text.x = element_text(size = 8, angle = 30, hjust = 1),
+        plot.margin = unit(c(20, 0, 20, 0), 'pt'),
+        legend.text = element_text(size = 4),
+        legend.title = element_text(size = 4),
+        legend.key.size = unit(10, "pt")
+    )
+
+ggsave("p_heatmap.png", plot = p_heatmap, width = 4, height = 4, dpi = 300)
+
+knitr::include_graphics("p_heatmap.png")
+
+## Systemic therapies ##
+
+therapy_labels = c(
+    "ind_immune_therapy" = "Immune Therapy", 
+    "ind_targeted_therapy" = "Targeted Therapy", 
+    "ind_cytotoxic_therapy" = "Cytotoxic Therapy", 
+    "XRT" = "External Beam Radiation",
+    "ind_radiotherapy" = "Radionuclide")
+
+n_labels = M_wide %>% 
+    summarise_at(
+        names(therapy_labels),
+        term_count
+    ) %>% t %>%
+    as.data.frame %>%
+    tibble::rownames_to_column('term') %>%
+    dplyr::rename(n = V1)
+
+formula = paste0(
+    'ch_pancan_pd', ' ~ ',
+    paste(
+    'timedx_impact',
+    'ind_cytotoxic_therapy',
+    'ind_immune_therapy',
+    'ind_radiotherapy',
+    'ind_targeted_therapy',
+    'XRT',
+    'age',
+    'smoke_bin',
+    'race_b', sep = ' + ')
+)
+
+summary_systemic = M_wide %>% 
+    glm(
+        formula = formula,
+        family = binomial(link="logit"),
+        na.action = 'na.omit'
+    ) %>%
+    sjPlot::get_model_data(type = "est",model = .) %>%
+    left_join(
+        n_labels,
+        by = 'term'
+    ) %>%
+    mutate(term = as.character(term)) %>%
+    mutate(term = ifelse(term %in% names(therapy_labels), therapy_labels[term], term)) %>%
+    filter(!str_detect(term, regex("age|smoke_bin1|race_b|timedx_impact"))) %>% 
+    mutate(term = paste0(term, ' (n = ', n, ')')) %>%
+    mutate(term = format_variable(term)) %>%
+    arrange(estimate) %>%
+    mutate(term = factor(term, levels = unique(term)))
+
+## Cytotoxic therapies ##
+
+formula = paste0(
+    'ch_pancan_pd ~ ',
+    paste(
+        'ind_taxane',
+        'ind_microtubule_damaging',
+        'ind_antimetabolite',
+        'ind_alkylating_agent',
+        'ind_platinum',
+        'ind_topoisomerase_ii_inh',
+        'ind_topoisomerase_i_inhi',
+        'ind_cytotoxic_therapy_ot',
+        'XRT',
+        'ind_targeted_therapy',
+        'ind_immune_therapy',
+        'age',
+        'smoke_bin',
+        'race_b',
+        'timedx_impact',
+        sep = ' + '))
+
+drug_list = c(
+    "ind_taxane",
+    "ind_microtubule_damaging",
+    "ind_antimetabolite", 
+    "ind_alkylating_agent",
+    "ind_platinum",
+    "ind_topoisomerase_ii_inh",
+    "ind_topoisomerase_i_inhi")
+
+n_labels = M_wide %>% 
+    summarise_at(
+        drug_list,
+        term_count
+    ) %>% t %>%
+    as.data.frame %>%
+    tibble::rownames_to_column('term') %>%
+    dplyr::rename(n = V1)
+
+summary_cytotoxic = M_wide %>%
+    glm(formula = formula, family = binomial(link = "logit"), na.action = 'na.omit') %>%
+    sjPlot::get_model_data(type = "est",model = .) %>%
+    left_join(
+        n_labels,
+        by = 'term'
+    ) %>%
+    mutate(term = paste0(term, ' (n = ', n, ')')) %>%
+    filter(str_detect(term, paste(drug_list, collapse = '|'))) %>%
+    mutate(term = format_variable(term)) %>%
+    mutate(term = factor(term, levels = unique(term[order(estimate)]))) %>%
+    filter(std.error < 100)
+
+## Platinum ##
+
+formula = paste0(
+    'ch_pancan_pd ~ ',
+    paste(
+        'ind_taxane',
+        'ind_microtubule_damaging',
+        'ind_antimetabolite',
+        'ind_alkylating_agent',
+        'ind_carboplatin',
+        'ind_cisplatin',
+        'ind_oxaliplatin',
+        'ind_topoisomerase_ii_inh',
+        'ind_topoisomerase_i_inhi',
+        'ind_radiotherapy',
+        'ind_targeted_therapy',
+        'ind_immune_therapy',
+        'XRT',
+        'age',
+        'smoke_bin',
+        'race_b',
+        'timedx_impact',
+        sep = ' + '))
+
+drug_list = c('ind_carboplatin','ind_cisplatin','ind_oxaliplatin')
+
+n_labels = M_wide %>% 
+    summarise_at(
+        drug_list,
+        term_count
+    ) %>% t %>%
+ as.data.frame %>%
+   tibble::rownames_to_column('term') %>%
+    dplyr::rename(n = V1)
+
+summary_platinum = M_wide %>% 
+    glm(
+        formula = formula, 
+        family = binomial(link="logit"),
+        na.action = 'na.omit'
+    ) %>%
+    sjPlot::get_model_data(type = "est",model = .) %>%
+    filter(str_detect(term, regex("carboplatin|cisplatin|oxaliplatin", ignore_case = T))) %>%
+    left_join(
+        n_labels,
+        by = 'term'
+    )  %>%   mutate(term = paste0(term, ' (n = ', n, ')')) %>%
+    filter(str_detect(term, paste(drug_list, collapse = '|'))) %>%
+    mutate(term = as.character(term)) %>%
+    mutate(term = format_variable(term)) %>%
+    arrange(estimate) %>%
+    mutate(term = factor(term, levels = unique(term)))
+
+summary_platinum %>%
+plot_forest(
+    x = "term",
+    eb_w = 0,
+    eb_s = 2,
+    ps = 3,
+    or_s = 4
+) +
+xlab('') +
+ylab('OR') +
+scale_color_manual(values = pal_nejm()(4)[3:4])
+
+## Combined Plot ##
+
+p_forest = rbind(
+        summary_systemic %>% mutate(group="Systemic Therapy"),
+        summary_cytotoxic %>% mutate(group="Cytotoxic Therapy"),
+        summary_platinum %>% mutate(group="Platinum")
+    ) %>%
+    mutate(group = factor(group, c('Systemic Therapy', 'Cytotoxic Therapy', 'Platinum'))) %>%
+    arrange(group, estimate) %>%
+    mutate(term = factor(term, levels = unique(term))) %>%
+    plot_forest(
+        x = "term",
+        eb_w = 0,
+        eb_s = 1.5,
+        label="p.stars",
+        ps = 2,
+        or_s = 3) +
+    facet_wrap(~group, scales = "free_y", ncol = 1) +
+    panel_theme +
+    # theme_classic() +
+    theme(
+        strip.placement = 'bottom',
+        strip.text = element_text(size = 8),
+        plot.margin = unit(c(0,10,0,0), 'pt'),
+        axis.text.y = element_text(size = 6)
+    ) +
+    scale_fill_nejm() +
+    scale_color_nejm() +
+    ylab('Odds Ratio of CH-PD') +
+    xlab('') +
+    scale_x_discrete(expand = c(0.25,0))
+
+g_forest = ggplot_build(p_forest) 
+gt = ggplot_gtable(g_forest) 
+panels = gt$layout$t[grepl("panel", gt$layout$name)]
+vtiles = c(5,7,3)
+gt$heights[panels] <- unit(vtiles, "null")
+p_forest = as.ggplot(gt)
+p_forest
+
+ggsave("p_forest.png", plot = p_forest, width = 4, height = 4, dpi = 300)
+
+knitr::include_graphics("p_forest.png")
+ 
+formula = paste0(
+    'ch_pancan_pd ~ ',
+    paste(
+        'pct_taxane',
+        'pct_microtubule_damaging',
+        'pct_antimetabolite',
+        'pct_alkylating_agent',
+        'pct_platinum',
+        'pct_topoisomerase_ii_inh',
+        'pct_topoisomerase_i_inhi',
+        'pct_cytotoxic_therapy_ot',
+        'pct_targeted_therapy',
+        'pct_immune_therapy',
+        'eqd_3_t',
+        'age',
+        'smoke_bin',
+        'race_b',
+        'timedx_impact',
+        sep = ' + '))
+
+# p vals for trend
+pvals = c(
+    'pct_platinum' = M_wide %>%
+        filter(pct_platinum >= 1) %>%
+        glm(formula = formula,
+            family = binomial(link = "logit"),
+            na.action = 'na.omit') %>%
+        sjPlot::get_model_data(type = "est",model = .) %>%
+        filter(term == 'pct_platinum') %$%
+        p.value,
+    'pct_topoisomerase_ii_inh' = M_wide %>%
+        filter(pct_topoisomerase_ii_inh >= 1) %>%
+        glm(formula = formula, family = binomial(link = "logit"), na.action = 'na.omit') %>%
+        sjPlot::get_model_data(type = "est",model = .) %>%
+        filter(term == 'pct_topoisomerase_ii_inh') %$%
+        p.value,
+    'eqd_3_t' = M_wide %>%
+        filter(eqd_3_t >= 1) %>%
+        glm(formula = formula, family = binomial(link = "logit"), na.action = 'na.omit') %>%
+        sjPlot::get_model_data(type = "est",model = .) %>%
+        filter(term == 'eqd_3_t') %$%
+        p.value
+)
+
+summary_class_b = M_wide %>%
+    mutate_at(
+        c('pct_taxane', 'pct_microtubule_damaging', 'pct_antimetabolite',
+          'pct_alkylating_agent', 'pct_platinum', 'pct_topoisomerase_ii_inh',
+          'pct_topoisomerase_i_inhi', 'eqd_3_t'),
+        factor
+    ) %>%
+    glm(formula = formula, family = binomial(link="logit"), na.action = 'na.omit') %>%
+    sjPlot::get_model_data(type = "est",model = .) %>%
+    dplyr::rename(Drug = term) %>%
+    filter(str_detect(Drug, 'pct_topoisomerase_ii_inh|pct_platinum|eqd_3_t')) %>%
+    mutate(
+        Dosage = str_extract(Drug, '[0-9]$'),
+        Drug = str_replace(Drug, '[0-9]$', '')
+    ) %>%
+    mutate(
+        Dosage = factor(Dosage, levels = sort(unique(Dosage), decreasing = F))
+    ) %>%
+    mutate(
+        Drug = ifelse(
+            Drug %in% names(pvals),
+            paste0(Drug, '\n(p = ', signif(pvals[Drug], 2), ')'),
+            Drug)
+    ) %>%
+    mutate(Drug = format_variable(Drug)) 
+
+## Platinum ##
+
+formula = paste0(
+    'ch_pancan_pd ~ ',
+    paste(
+        'pct_taxane',
+        'pct_microtubule_damaging',
+        'pct_antimetabolite',
+        'pct_alkylating_agent',
+        'pct_carboplatin',
+        'pct_cisplatin',
+        'pct_oxaliplatin',
+        'pct_topoisomerase_ii_inh',
+        'pct_topoisomerase_i_inhi',
+        'pct_cytotoxic_therapy_ot',
+        'pct_targeted_therapy',
+        'pct_immune_therapy',
+        'eqd_3_t',
+        'age',
+        'smoke_bin',
+        'race_b',
+        'timedx_impact',
+        sep = ' + '))
+
+drug_list = c('pct_carboplatin', 'pct_cisplatin', 'pct_oxaliplatin')
+
+# p values for trend
+pvals = sapply(
+    drug_list,
+    function(drug) {
+        pval = M_wide %>% filter(!!drug > 0) %>%
+        glm(formula = formula, family = binomial(link = "logit"), na.action = 'na.omit') %>%
+        sjPlot::get_model_data(type = "est",model = .) %>%
+        filter(term == drug) %$%
+        p.value %>%
+        signif(2)
+    }
+)
+
+summary_platinum = M_wide %>% 
+    mutate_at(
+        drug_list,
+        factor
+    ) %>%
+    glm(formula = formula, family = binomial(link = "logit"), na.action = 'na.omit') %>%
+    sjPlot::get_model_data(type = "est",model = .) %>%
+    dplyr::rename(Drug = term) %>%
+    mutate(
+        Dosage = str_extract(Drug, '[0-9]'),
+        Drug = str_replace(Drug, '[0-9]', '')
+    ) %>%
+    mutate(Dosage = factor(Dosage, levels = sort(unique(Dosage), decreasing = T))) %>%
+    filter(Drug %in% drug_list) %>%
+    mutate(
+        Drug = ifelse(
+            Drug %in% names(pvals),
+            paste0(Drug, '\n(p = ', signif(pvals[Drug], 2), ')'),
+            Drug)
+    ) %>%
+    mutate(Drug = format_variable(Drug)) %>%
+    mutate(Drug = factor(Drug, levels = unique(Drug)))
+
+p_dose = ggplot(
+        rbind(summary_class_b, summary_platinum) %>%
+            mutate(Drug = factor(Drug, unique(Drug))),
+        aes(x = Dosage, y = estimate, group = 1)
+    ) +
+    geom_point() + 
+    geom_line() + 
+    ylab("OR of CH-PD") +
+    scale_x_discrete(expand = c(0.1,0)) +
+    xlab("Tertile of Cumulative Therapy Dose") +
+    geom_ribbon(aes(ymin=conf.low, ymax=conf.high, x=Dosage, fill = ""), alpha = 0.3) +
+    facet_wrap(~Drug, nrow = 2, scale = 'free') +
+    theme_classic() +
+    panel_theme +
+    theme(
+       legend.position = 'none'
+    )
+
+ggsave("p_dose.png", plot = p_dose, width = 4, height = 2, dpi = 300)
+
+knitr::include_graphics("p_dose.png")
+
+panel = (p_forest + labs(title = 'a') | ((p_dose + labs(title = 'b'))/ (p_heatmap + labs(title = 'c')) + plot_layout(heights = c(3,5)))) + plot_layout(widths = c(3, 2))
+
+# panel
+do_plot(panel, "fig2.png", 10, 6, save_pdf = T)
+```
+
+#Figure 3 - clonal dynamics
+```{r}
+# delta vaf significance
+M2['pval_T1_vs_T2'] <-
+  apply(M2, 1, function(mut) {
+    
+    refs_1 = as.integer(mut['refs_1'])
+    alts_1 = as.integer(mut['alts_1'])
+    refs_2 = as.integer(mut['refs_2'])
+    alts_2 = as.integer(mut['alts_2'])
+    
+    # if 0 in Serial, then CI def don't overlap
+    if (refs_2 + alts_2 == 0 | refs_1 + alts_1 == 0) {
+      p = 0
+    } else if (alts_1 < 15 | alts_2 < 15) {
+      p = data.frame(
+        x = c(alts_1, alts_2),
+        n = c(refs_1 + alts_1, refs_2 + alts_2),
+        row.names = c('N', 'T')
+      ) %>% fisher.test %>% .$p.value
+    } else {
+      p = prop.test(c(alts_1, alts_2), c(refs_1 + alts_1, refs_2 + alts_2),
+                    conf.level = 0.95, correct = FALSE)$p.value
+    }
+    
+    return(p)
+  })
+
+# grouping based on p value
+M2 = M2 %>% mutate(direction = ifelse(pval_T1_vs_T2 < 0.05, ifelse(VAF_2 > VAF_1, 'UP', 'DOWN'), 'STABLE'))
+```
+
+```{r}
+font_size = 8
+
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = font_size),
+    plot.title = element_text(face = 'bold', size = 12, hjust = 0, vjust = -5),
+    axis.title = element_text(size = font_size),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = font_size),
+    axis.text.y = element_text(size = font_size),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+therapy_colors = c('#D55E00', '#0072B2')
+
+## Other vs DDR
+D = M2 %>%
+    filter(ddr_CH) %>%
+    melt(
+        measure.vars = c('XRT1', 'ind_cytotoxic_therapy1'),
+        variable.name = 'treatment_type',
+        value.name = 'treatment'
+    ) %>%
+    mutate(treatment_type = c('XRT1' = 'XRT', 'ind_cytotoxic_therapy1' = 'Cytotoxic')[treatment_type]) %>%
+    mutate(treatment = recode(treatment, `1` = 'treated', `0` = 'untreated')) %>%
+    mutate(treatment = factor(treatment, levels = c('treated', 'untreated')))
+
+jitter = geom_jitter(
+        pch = 21,
+        size = 1,
+        alpha = 0.8,
+        width = 0.1,
+        color = 'black',
+        fill = 'grey'
+        )
+
+p_ddr_CH = ggplot(
+      D,
+      aes(x = treatment, y = log(growth_rate), fill = treatment)) + 
+  geom_boxplot(outlier.alpha = 0, color = 'black') +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("") +
+  ylab('log growth rate') +
+  jitter + 
+  facet_wrap(~treatment_type) +
+  panel_theme +
+  theme(
+    axis.text.x = element_blank()
+  ) +
+  scale_y_continuous(
+      expand = c(0.1, 0), 
+      limits = c(-0.006, 0.006)
+  ) +
+  stat_compare_means(
+    aes(label = paste0("p = ", ..p.format..)),
+    method = 't.test',
+    comparisons = list(c('treated', 'untreated')),
+    size = 2.5
+  ) +
+  labs(subtitle = 'DDR') +
+  scale_fill_manual(values = therapy_colors)
+
+D = M2 %>%
+    filter(!ddr_CH) %>%
+    melt(
+        measure.vars = c('XRT1', 'ind_cytotoxic_therapy1'),
+        variable.name = 'treatment_type',
+        value.name = 'treatment'
+    ) %>%
+    mutate(treatment_type = c('XRT1' = 'XRT', 'ind_cytotoxic_therapy1' = 'Cytotoxic')[treatment_type]) %>%
+    mutate(treatment = recode(treatment, `1` = 'treated', `0` = 'untreated')) %>%
+    mutate(treatment = factor(treatment, levels = c('treated', 'untreated')))
+
+p_other = ggplot(
+      D,
+      aes(x = treatment, y = log(growth_rate), fill = treatment)) + 
+  geom_boxplot(outlier.alpha = 0, color = 'black') +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("") +
+  ylab('') +
+  jitter +
+  facet_wrap(~treatment_type) +
+  panel_theme +
+  theme(
+  axis.text.x = element_blank()
+  ) +
+  scale_y_continuous(
+      expand = c(0.1, 0),
+      limits = c(-0.006, 0.006)
+  ) +
+  stat_compare_means(
+    aes(label = paste0("p = ", ..p.format..)),
+    method = 't.test',
+    comparisons = list(c('treated', 'untreated')),
+    size = 2.5
+  ) +
+  labs(subtitle = 'Other') +
+  scale_fill_manual(values = therapy_colors)
+
+## Clonal competition
+D = M2 %>%
+    group_by(STUDY_ID) %>%
+    filter(any(ddr_CH) & any(!ddr_CH)) %>%
+    ungroup() %>%
+    group_by(STUDY_ID, ddr_CH) %>%
+    summarise(
+        max_log_alpha = log(max(growth_rate)),
+        therapy_binary = unique(therapy_binary),
+        Gene = ifelse(any(ddr_CH), Gene[1], 'other')
+    ) %>%
+    mutate(therapy_binary = ifelse(therapy_binary == 1, 'treated', 'untreated')) %>%
+    mutate(therapy_binary = factor(therapy_binary, c('treated', 'untreated'))) %>%
+    mutate(ddr_CH = ifelse(ddr_CH, 'DDR', 'Other')) %>%
+    mutate(ddr_CH = factor(ddr_CH, c('DDR', 'Other'))) %>%
+    ungroup()
+
+p_tr = D %>% 
+    filter(therapy_binary == 'treated') %>%
+    dcast(STUDY_ID ~ ddr_CH, value.var = 'max_log_alpha') %>%
+    {t.test(.[['DDR']], .[['Other']], paired = TRUE, alternatie = 'two.sided')$p.value}
+
+p_untr = D %>%
+    filter(therapy_binary == 'untreated') %>%
+    dcast(STUDY_ID ~ ddr_CH, value.var = 'max_log_alpha') %>%
+    {t.test(.[['DDR']], .[['Other']], paired = TRUE, alternatie = 'two.sided')$p.value}
+
+D = D %>% 
+    arrange(therapy_binary) %>%
+    mutate(
+        therapy_binary = ifelse(
+            therapy_binary == 'treated',
+            paste0(therapy_binary, ' (n = ', sum(D$therapy_binary == 'treated')/2, ')', '\n', 'p = ', format(signif(p_tr, 2), scientific = T)),
+            paste0(therapy_binary, ' (n = ', sum(D$therapy_binary == 'untreated')/2, ')', '\n', 'p = ', format(signif(p_untr, 2), scientific = T))
+            )
+    ) %>%
+    mutate(therapy_binary = factor(therapy_binary, unique(therapy_binary)))
+
+p_comp = ggplot(
+        D,
+        aes(x = ddr_CH, y = max_log_alpha, group = STUDY_ID, fill = therapy_binary, color = therapy_binary)
+    ) +
+    geom_line(alpha = 0.7) +
+    geom_point(
+        color = 'black', pch = 21, fill = 'grey'
+    ) + 
+    panel_theme +
+    xlab('') +
+    ylab('log growth rate') +
+    scale_fill_manual(values = therapy_colors) +
+    scale_color_manual(values = therapy_colors) +
+    facet_wrap(~therapy_binary, ncol = 2)
+
+## Single genes
+dta_genes = c('DNMT3A', 'TET2', 'ASXL1')
+ddr_genes = c('PPM1D', 'TP53', 'CHEK2')
+gene_list = c(ddr_genes, dta_genes)
+
+D = M2 %>% 
+    filter(Gene %in% gene_list) %>%
+    mutate(
+        therapy_binary = recode(therapy_binary, `1` = 'treated', `0` = 'untreated')
+    ) %>%
+    mutate(therapy_binary = factor(therapy_binary, c('treated', 'untreated'))) %>%
+    mutate(Gene = factor(Gene, gene_list)) %>%
+    mutate(gene_cat = ifelse(Gene %in% dta_genes, 'DTA', 'DDR'))
+
+tests = D %>% 
+    filter(Gene != 'CHEK2') %>%
+    group_by(Gene) %>%
+    summarise(
+        p.val = t.test(
+            log(growth_rate[therapy_binary == 'treated']),
+            log(growth_rate[therapy_binary == 'untreated'])
+        )$p.value
+    ) %>%
+    rowwise() %>%
+    mutate(q.val = p.adjust(p.val, method = 'fdr', n = nrow(.)))
+
+D = D %>% left_join(tests, by = 'Gene') %>%
+    arrange(Gene) %>%
+    mutate(gene_label = paste0(Gene, '\nq = ', signif(q.val,2))) %>%
+    mutate(gene_label = factor(gene_label, unique(gene_label)))
+
+p_genes = ggplot(
+      D,
+      aes(x = therapy_binary, y = log(growth_rate), fill = therapy_binary)
+  ) +
+  geom_boxplot(outlier.alpha = 0, color = 'black') +
+  facet_wrap(~gene_label, nrow = 1) +
+  geom_jitter(
+      pch = 21,
+      size = 1,
+      alpha = 0.8, 
+      width = 0.1,
+      color = 'black',
+      fill = 'grey'
+  ) +
+  ylab('log growth rate') +
+  xlab('') +
+  panel_theme +
+  scale_fill_manual(values = therapy_colors) + 
+  theme(
+    legend.title = element_blank(),
+    # axis.text.x = element_text(angle = 15, size = font_size/1.2, hjust = 0.5),
+    axis.text.x = element_blank(),
+    legend.position = 'right'
+  )
+
+## Dosage
+
+# p values
+get_p = function(M, indi) {
+  M %>%
+  filter(get(indi) >= 1) %>%
+    filter(!is.na(age_1)) %>%
+    geepack::geeglm(
+        data = .,
+        formula = as.formula(paste0('log(growth_rate) ~ ', indi, ' + age_1 + Gender + smoke_bin')),
+        id = STUDY_ID,
+        corstr = "exchangeable"
+    ) %>%
+    summary %>% .$coefficients %>%
+    as.data.frame %>%
+    tibble::rownames_to_column('factor') %>%
+    filter(factor == indi) %>%
+    pull('Pr(>|W|)') %>%
+    signif(2) %>%
+    format(scientific = T)
+}
+
+
+pval_ddr_CH_xrt = M2 %>% filter(ddr_CH) %>% get_p('eqd_3_t1')
+pval_other_xrt = M2 %>% filter(!ddr_CH) %>% get_p('eqd_3_t1')
+
+pval_ddr_CH_cyto = M2 %>% filter(ddr_CH) %>% get_p('pct_cytotoxic_therapy1')
+pval_other_cyto = M2 %>% filter(!ddr_CH) %>% get_p( 'pct_cytotoxic_therapy1')
+
+pct_continuous <- function(M, title = '') {
+    
+    Mr = M %>% group_by(pct, treatment_type) %>% 
+        summarise(
+            mean_log_alpha = mean(log(growth_rate)),
+            lower = quantile(log(growth_rate), 0.25),
+            upper = quantile(log(growth_rate), 0.75)
+        )
+    
+    p = ggplot(
+            M,
+            aes(x = pct, y = log(growth_rate))
+        ) +
+        geom_ribbon(
+            data = Mr,
+            inherit.aes = F,
+            aes(x = pct,
+                ymin = lower,
+                ymax = upper,
+                group = ''
+            ),
+            fill = pal_nejm()(8)[6],
+            alpha = 0.6
+        ) +
+        geom_line(
+            data = Mr,
+            inherit.aes = F,
+            aes(x = pct,
+                y = mean_log_alpha,
+                group = ''
+            ),
+            color = pal_nejm()(8)[6]
+        ) +
+        facet_wrap(~treatment_type, nrow = 1) +
+        labs(subtitle = title) +
+        panel_theme +
+        theme(axis.title.x.top = element_text(size = 4)
+        ) +
+        xlab('dosage tertile') +
+        ylab('log growth rate') +
+        geom_jitter(
+            pch = 21,
+            width = 0.1,
+            size = 1,
+            alpha = 1,
+            color = 'black',
+            fill = 'grey'
+        ) +
+        scale_fill_nejm()
+    
+    return(p)
+}
+
+D = M2 %>%
+    melt(
+        measure.vars = c('eqd_3_t1', 'pct_cytotoxic_therapy1'),
+        variable.name = 'treatment_type',
+        value.name = 'pct'
+    ) %>%
+    filter(!is.na(pct)) %>%
+    mutate(pct = factor(as.integer(pct))) %>%
+    mutate(treatment_type = c('eqd_3_t1' = 'XRT', 'pct_cytotoxic_therapy1' = 'Cytotoxic')[treatment_type])
+
+p_dose_ddr = pct_continuous(
+    D %>% filter(ddr_CH) %>%
+      mutate(treatment_type = paste0(treatment_type, '\n(p = ', c('Cytotoxic' = pval_ddr_CH_cyto, 'XRT' = pval_ddr_CH_xrt)[treatment_type], ')')), 
+    'DDR'
+) + ylim(-0.006, 0.006)
+
+p_dose_other = pct_continuous(
+    D %>% filter(!ddr_CH) %>% 
+      mutate(treatment_type = paste0(treatment_type, '\n(p = ', c('Cytotoxic' = pval_other_cyto, 'XRT' = pval_other_xrt)[treatment_type], ')')), 
+    'Other'
+) + ylab('') + ylim(-0.006, 0.006)
+
+dat = M2
+direction_colors = c('firebrick3', 'grey45', 'lightskyblue') %>% 
+    setNames(c('UP', 'STABLE', 'DOWN')) %>%
+    scale_color_manual(name = "status", values = .)
+tx_categories = c("Untreated", "Targeted or\nImmune Therapy", "Cytotoxic Therapy", "XRT")
+dat$tx_category = ifelse(dat$ind_anychemo1==0 & dat$XRT1==0, tx_categories[1],
+                 ifelse((dat$ind_targeted_therapy1==1 | dat$ind_immune_therapy1==1) &
+                        dat$ind_cytotoxic_therapy1==0 & dat$XRT1==0,
+                        tx_categories[2],
+                 ifelse(dat$ind_cytotoxic_therapy1==1, tx_categories[3],
+                 ifelse(dat$XRT1 == 1 , tx_categories[4],
+                 "OTHER"))))
+dat <- dat %>% mutate(changeT2T1 = VAF_2-VAF_1)
+dat <- dat %>% mutate(delta_per_year = changeT2T1 / (delta_time/365))
+dat_delta_avg <- dat %>% filter(tx_category != "OTHER") %>% group_by(tx_category) %>%
+summarise(mean_delta_per_year = mean(delta_per_year),
+          mean_delta_percent = round(100 * mean_delta_per_year, 2),
+          delta_time = 365)
+
+p_spider = dat %>% 
+    filter(tx_category != "OTHER") %>%
+    mutate(tx_category = factor(tx_category, tx_categories)) %>%
+    ggplot(
+        aes(x = delta_time, y = changeT2T1, group = paste0(STUDY_ID, variant_id), color = direction)
+    ) +
+    geom_segment(
+        data = . %>% filter(direction == 'STABLE'),
+        aes(x = delta_time, y = changeT2T1, xend = 0, yend = 0, color = direction),
+        size = 0.2,
+        alpha = 0.5
+    ) + 
+    geom_point(
+        data = . %>% filter(direction == 'STABLE'),
+        size = 0.2,
+        alpha = 0.8
+    ) +
+    geom_segment(
+        data = . %>% filter(direction != 'STABLE'),
+        aes(x = delta_time, y = changeT2T1, xend = 0, yend = 0, color = direction),
+        size = 0.2,
+        alpha = 0.5
+    ) + 
+    geom_point(
+        data = . %>% filter(direction != 'STABLE'),
+        size = 0.2,
+        alpha = 0.8
+    ) +
+    theme_classic() +
+    labs(
+        x = "Days between Blood Draw",
+        y = "Change in VAF"
+    ) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position="top"
+    ) +
+  facet_wrap(~tx_category, ncol = 4, nrow = 1) +
+  panel_theme +
+  theme(
+    legend.title = element_blank(),
+    legend.position = 'right'
+  ) +
+  direction_colors
+
+panel = (p_spider + labs(title = 'A')) /
+  ((p_ddr_CH + labs(title = 'B'))| p_other) / 
+  (p_genes + labs(title = 'C')) / 
+  ((p_dose_ddr + labs(title = 'D'))| p_dose_other) / 
+  (p_comp + labs(title = 'E'))
+
+do_plot(panel, "figure3.png", 6.5, 11, save_pdf = T)
+```
+
+##Figure 4 - CH to tMN
+```{r 4a}
+
+#CH overall
+M_tmn_wide_st <- M_tmn_wide_st %>% mutate(center =fct_relevel(center, "MSK","MDA","MOF","HCC"))
+
+cox <- coxph(Surv(timelastfu, post_tmn) ~ ch_my_pd + age_d + Gender + strata(center), data= M_tmn_wide_st)
+cox
+
+cox <- coxph(Surv(timelastfu, post_tmn) ~ ch_my_pd*center + age_d + Gender + strata(center), data= M_tmn_wide_st)
+cox
+
+#Mutation number and max VAF
+mut_var <- c("n_mut_r","VAF_nonsilent_r")
+
+cox_data <- list()
+cox_mut_var <- list()
+  for (var in mut_var) {
+      
+    cox <- coxph(Surv(timelastfu, post_tmn) ~ as.factor(get(var))+ age + Gender + strata(center), data= M_tmn_wide_st)
+    cox_data <- cox %>% get_model_data(type="est")
+    cox_data <- cox_data %>% cbind(mut_var = var)
+    cox_mut_var <- rbind(cox_mut_var, cox_data)
+                          }
+cox_mut_var_stonly<- cox_mut_var %>% filter(term!="age" & term!="GenderM")
+
+#Gene Effects
+top_genes_cases <- M_tmn_long %>%
+filter(VAF_1 >= 0.02 & center!="PMC" & center!="WSU" & post_tmn==1) %>%
+group_by(Gene) %>%
+  summarise(count=n_distinct(center_id)) %>%
+  arrange(-count)  %>%
+  filter(count>=2) %>% 
+  pull(Gene) %>%
+  as.character()
+
+top_genes_controls <- M_tmn_long %>%
+filter(VAF_1 >= 0.02 & center!="PMC" & center!="WSU") %>%
+group_by(Gene) %>%
+  summarise(count=n_distinct(center_id)) %>%
+  arrange(-count)  %>%
+  filter(count>=20) %>% 
+  pull(Gene) %>%
+  as.character()
+
+top_genes <- top_genes_cases %>% intersect(top_genes_controls)
+
+cox_gene_var <- list()
+  for (gene in top_genes) {
+    cox <- coxph(Surv(timelastfu, post_tmn) ~ get(gene) + age + Gender + strata(center), data= M_tmn_wide_st, na.action=na.omit)
+    cox_data <- cox %>% get_model_data(type="est")
+    cox_data <- cox_data %>% cbind(Gene = gene)
+    cox_gene_var <- rbind(cox_gene_var, cox_data)
+  }
+
+#CBC parameters
+cbc_var <- c("hgb_c","mcv_c","rdw_c","wbc_c","hgb_c","anc_c","amc_c","plt_c")
+
+cox_cbc_var <- list()
+  for (var in cbc_var) {
+    cox <- coxph(Surv(timelastfu, post_tmn) ~ get(var)+ age + Gender + strata(center), data= M_tmn_wide_st , na.action=na.omit)
+    cox_data <- cox %>% get_model_data(type="est")
+    cox_data <- cox_data %>% cbind(CBC_var = var)
+    cox_cbc_var <- rbind(cox_cbc_var, cox_data)
+                          }
+    
+cbc = cox_cbc_var %>%
+    filter(CBC_var %in% cbc_var) %>%
+    filter (term=="get(var)") %>%
+    mutate(CBC = case_when(
+            CBC_var == 'wbc_c' ~ "White Blood Cell Count",
+            CBC_var == 'anc_c' ~ "Neutrophil Count",
+            CBC_var == 'amc_c' ~ "Monocyte Count",
+            CBC_var == 'hgb_c' ~ "Hemoglobin",
+            CBC_var == 'mcv_c' ~ "Mean Corpuscular Volume",
+            CBC_var == 'rdw_c' ~ "Red Cell Distribution Width",
+            CBC_var == 'plt_c' ~ "Platelets"
+    ))
+
+#One forest plot for all
+cox_gene_var_v2 <- cox_gene_var %>%
+    filter(term=="get(gene)") %>%
+    mutate(group="Gene") %>%
+    mutate(mut_var= factor(Gene, levels=unique(Gene[order(estimate)])))
+
+cbc_v2 <- cbc %>% mutate(mut_var=CBC) %>% mutate(group="Blood Count Index")
+
+cox_gene_var_v2 <- select(cox_gene_var_v2,-c(Gene))
+
+cbc_v2 <- select(cbc_v2,-c(CBC_var,CBC)) %>% mutate(mut_var= factor(mut_var, levels=unique(mut_var[order(estimate)])))
+
+cox_mut_var_stonly_v2 <- cox_mut_var_stonly %>%
+            mutate(new_var=case_when(
+            term=="as.factor(get(var))1" & mut_var=="n_mut_r" ~ "1",
+            term=="as.factor(get(var))2" & mut_var=="n_mut_r" ~ "2",
+            term=="as.factor(get(var))3" & mut_var=="n_mut_r" ~ "3 or more"
+            ))
+
+cox_mut_var_stonly_v2 <- cox_mut_var_stonly_v2 %>%
+            mutate(new_var=case_when(
+            term=="as.factor(get(var))1" & mut_var=="VAF_nonsilent_r" ~ "2-5%",
+            term=="as.factor(get(var))2" & mut_var=="VAF_nonsilent_r" ~ "5-10%",
+            term=="as.factor(get(var))3" & mut_var=="VAF_nonsilent_r" ~ "10-20%",
+            term=="as.factor(get(var))4" & mut_var=="VAF_nonsilent_r" ~ "20% or more",
+            TRUE ~ new_var
+            ))
+
+cox_mut_var_stonly_v2 <- cox_mut_var_stonly_v2 %>%
+            mutate(group=case_when(
+            mut_var=="n_mut_r" ~ "Mutation Number",
+            mut_var=="VAF_nonsilent_r" ~ "Maximum VAF"))
+
+cox_mut_var_stonly_v2 <- cox_mut_var_stonly_v2 %>% select(-c("mut_var"))
+cox_mut_var_stonly_v2 <- cox_mut_var_stonly_v2 %>% rename(mut_var=new_var)
+
+combo <- rbind(cox_gene_var_v2, cbc_v2, cox_mut_var_stonly_v2)
+
+uni_plot = plot_forest(
+      combo,
+      x = "mut_var",
+      label = 'p.stars',
+      eb_w = 0,
+      eb_s = 0.3,
+      ps = 1.5,
+      or_s = 2,
+      nudge = -0.3) +
+ #     col = 'group'
+  facet_grid(group ~ ., scale = 'free_y', space = "free_y") +
+   scale_x_discrete(
+       breaks = combo$mut_var,
+       labels = combo$mut_var,
+       expand = c(0.2,0)
+   ) +
+  xlab('') + ylab('Hazard Ratio of tMN') +
+  scale_color_nejm() +
+  panel_theme
+ 
+do_plot(uni_plot, "figure4a.png", w = 3, h = 4)
+```
+
+```{r Figure 4b/c}
+#Dont include PPM1D and SRSF2 b/c missing in some
+gene_vars = c("TET2","SF3B1","TP53","U2AF1")
+mut_vars = c("VAF_nonsilent_r","n_mut_r")
+cbc_vars = c("hgb_c","rdw_c", "mcv_c", "wbc_c","anc_c", "plt_c")
+demo_vars = c('age', 'Gender','strata(center)')
+
+#include mean imputation for blood counts when missing
+D = M_tmn_wide_st %>%
+    filter(!is.na(age)) %>%
+    filter(center != 'PMC') %>%
+    mutate_at(vars(cbc_vars),.funs = funs(ifelse(is.na(.), mean(., na.rm=TRUE), .)))
+
+form = paste0(
+    'Surv(timelastfu, post_tmn) ~ ',
+    paste(
+        c(
+            gene_vars,
+            mut_vars,
+            cbc_vars,
+            demo_vars
+        ),
+        collapse = ' + '
+    )
+)
+
+model = coxph(formula = as.formula(form), data = D, na.action=na.omit) %>% summary
+
+betas = model %>%
+    .$coefficients %>% as.data.frame %>% 
+    tibble::rownames_to_column('term') %>%
+    filter(!(term %in% c(
+        'pre_any_therapy',
+        'GenderM') 
+        )
+    ) %>% select(term, coef)
+
+# add beta of therapy from external source
+betas = betas %>% rbind(data.frame(term = 'chemo', coef = log(6.8)))
+
+# prepare covariate matrix
+Z = left_join(
+      #add average chemo
+      M_tmn_wide_st %>% mutate(
+          age_bin = case_when(
+              age < 20 ~ '<20',
+              age >= 20 & age < 25 ~ '20-24',
+              age >= 25 & age < 30 ~ '25-29',
+              age >= 30 & age < 35 ~ '30-34',
+              age >= 35 & age < 40 ~ '35-39',
+              age >= 40 & age < 45 ~ '40-44',
+              age >= 45 & age < 50 ~ '45-49',
+              age >= 50 & age < 55 ~ '50-54',
+              age >= 55 & age < 60 ~ '55-59',
+              age >= 60 & age < 65 ~ '60-64',
+              age >= 65 & age < 70 ~ '65-69',
+              age >= 70 & age < 75 ~ '70-74',
+              age >= 75 & age < 80 ~ '75-79',
+              age >= 80 & age < 85 ~ '80-84',
+              age >= 85 ~ '85+'
+              )
+      ),
+      T_seer %>%
+          rename(age_bin = age) %>%
+          mutate(age_bin = str_remove(age_bin, ' years')),
+      by = 'age_bin'
+  ) %>%
+  filter(age > 50 & age < 75) %>%
+  filter(pre_any_therapy == 0) %>%
+  filter(center == 'MSK') %>%
+  select(betas$term, post_tmn) %>%
+  filter(complete.cases(.))
+
+y = Z %>% pull(post_tmn)
+Z = Z %>% select(-post_tmn)
+
+# info for the covariates
+Z_info = lapply(betas$term, function(x){list(name = x, type = 'continuous')})
+
+## formula
+formula = paste0(
+    'observed.outcome ~ ',
+    paste(
+        betas$term,
+        collapse = '+',
+        sep = '+'
+    )
+)
+
+# modified chemoxrt column
+Z_tr = Z %>% mutate(chemo = 1)
+Z_untr = Z %>% mutate(chemo = 0)
+
+## build model
+res_tr = iCARE::computeAbsoluteRisk(
+    model.formula = as.formula(formula),
+    model.cov.info = Z_info,
+    model.ref.dataset = Z,
+    model.log.RR = as.matrix(unname(tibble::column_to_rownames(betas, 'term'))),
+    model.disease.incidence.rates = tmn_inc,
+    model.competing.incidence.rates = mort_inc,
+    apply.age.start = 1,
+    apply.age.interval.length = 9,
+    apply.cov.profile = Z_tr,
+    return.refs.risk = TRUE
+)
+
+res_untr = iCARE::computeAbsoluteRisk(
+    model.formula = as.formula(formula),
+    model.cov.info = Z_info,
+    model.ref.dataset = Z,
+    model.log.RR = as.matrix(unname(tibble::column_to_rownames(betas, 'term'))),
+    model.disease.incidence.rates = tmn_inc,
+    model.competing.incidence.rates = mort_inc,
+    apply.age.start = 1,
+    apply.age.interval.length = 9,
+    apply.cov.profile = Z_untr,
+    return.refs.risk = TRUE
+)
+
+#Figure 4b
+D = data.frame(
+        risk_ref = as.vector(res_tr$refs.risk),
+        risk_tr = as.vector(res_tr$risk),
+        risk_untr = as.vector(res_untr$risk),
+        Z
+    ) %>%
+    mutate(
+        risk_untr_pct = ntile(risk_untr, 100)
+    )
+
+p_dist <- D %>% ggplot(
+    aes(x = risk_ref)
+) +
+theme_classic() +
+geom_density(alpha = 0.5,color = "black", fill = "gray") +
+xlim(0.0,0.022) +
+ylim(0.0, 400) +
+theme_classic() +
+geom_density(alpha = 0.5) +
+xlim(0,0.022) +
+scale_fill_nejm() +
+ylab('Number of Women') +
+xlab("10-year absolute risk of AML/MDS for women with breast cancer in the U.S aged 50-75")
+
+do_plot(p_dist, "figure4b.svg", w = 6, h = 2.5)
+
+#Calculate number of women with absolute risk of more than 1%
+morethan1 <- D %>% filter(risk_ref>0.01) %>% count()
+total <- D %>% count()
+(total-morethan1)/total
+
+#Figure 4c
+D = data.frame(
+        risk_ref = as.vector(res_tr$refs.risk),
+        risk_tr = as.vector(res_tr$risk),
+        risk_untr = as.vector(res_untr$risk)
+    ) %>%
+    mutate(
+        risk_untr_pct = ntile(risk_untr, 100) 
+    )%>%
+    melt(
+        measure.vars = c('risk_tr', 'risk_untr', 'risk_ref'),
+        value.name = 'risk',
+        variable.name = 'treatment'
+    )
+
+therapy_colors = c("#D55E00","#0072B2")
+
+p <- ggplot(D %>% filter(treatment %in% c('risk_tr', 'risk_untr')) %>%
+        filter(risk_untr_pct >= 97),
+    aes(x = as.factor(risk_untr_pct),
+        y = risk,
+        fill = treatment
+    )
+) +
+theme_bw() +
+scale_y_continuous(position = "left", limits = c(0,0.2)) +
+geom_boxplot(
+    position = 'dodge',
+    outlier.alpha = 0, 
+    alpha = 0.5,
+    size = 0.4
+) +
+scale_fill_nejm() +
+theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.y = element_line(linetype = 'dashed'),
+    legend.position = 'right'
+) +
+xlab('Absolute Risk Percentile') +
+ylab('Absolute 10-year AML/MDS Risk')
+
+p_zoom <- p+labs(fill = "Cytotoxic Therapy") + theme(legend.position = c(0.2, 0.7)) + scale_fill_manual(values = therapy_colors,labels = c("Yes", "No")) + scale_color_manual(values = therapy_colors)
+
+do_plot(p_zoom, "figure4c_box.svg", w = 6, h = 3)
+```
+
+# Extended and Supplemental Figures and Tables
+
+#eTable1 - baseline demographics
+```{r}
+tally_variable = function(D, baseline_cols, variable) {
+    
+    if (variable == 'Total') {
+       
+        res = cbind(
+            D %>% dcast(. ~ CH_all, fun.aggregate = length, value.var = 'STUDY_ID') %>% select(-.),
+            D %>% dcast(. ~ therapy_binary, fun.aggregate = length, value.var = 'STUDY_ID') %>% select(-.)
+        ) %>%
+        mutate(Total = rowSums(.[1:2])) %>%
+        mutate(variable = 'Total', category = 'Total') %>%
+        select(baseline_cols) %>%
+        mutate(ref = "")
+        
+    } else {
+        
+        ref = levels(D[[variable]])[1]
+        
+        if (is.null(ref)) {
+            ref = ""
+        }
+        
+        res = cbind(
+            D %>% dcast(paste0(variable, ' ~ CH_all'), fun.aggregate = length, value.var = 'STUDY_ID') %>%
+                mutate(variable = variable) %>% rename(category = !!variable),
+            D %>% dcast(paste0(variable, ' ~ therapy_binary'), fun.aggregate = length, value.var = 'STUDY_ID'),
+            D %>% count(get(variable)) %>% select(n) %>% rename(Total = n)
+        ) %>%
+        select(baseline_cols) %>%
+        arrange(category == 'Missing') %>% # sorting
+        mutate(ref = ref)
+    }
+    
+    res = res %>%
+        mutate(`CH-` = paste0(`CH-`, ' (', signif(`CH-`* 100/Total, 2), '%)')) %>%
+        mutate(`CH+` = paste0(`CH+`, ' (', signif(`CH+`* 100/Total, 2), '%)'))
+    return(res)
+}
+
+D = M_wide_all %>% 
+    mutate(CH_all = ifelse(CH_all, 'CH+', 'CH-')) %>%
+    mutate(age_verbose = case_when(
+        is.na(age_cat) ~ 'Missing',
+        T ~ paste0((age_cat - 1) * 10, '-', age_cat * 10))
+    ) %>%
+    mutate(smoke_verbose = case_when(
+        smoke_bin == 1 ~ "Current/Former",
+        smoke_bin == 0 ~ "Non Smoker",
+        T ~ 'Missing')
+    ) %>%
+    mutate(smoke_verbose = relevel(factor(smoke_verbose), ref = 'Non Smoker')) %>%
+    mutate(therapy_binary = ifelse(is.na(therapy_binary), 'Unknown', therapy_binary)) %>%
+    mutate(therapy_binary = factor(therapy_binary, c("Treated", "Untreated", "Unknown"))) %>%
+    mutate(Gender = relevel(factor(Gender), ref = 'Male')) %>%
+    mutate(generaltumortype = ifelse(
+        generaltumortype == '' | is.na(generaltumortype), 'Missing', generaltumortype)
+    ) %>%
+    mutate(generaltumortype = format_variable(generaltumortype))
+
+baseline_cols = c('variable', 'category', 'CH-', 'CH+', 'Total')
+
+rbind(
+    D %>% tally_variable(baseline_cols = baseline_cols, variable = 'Total'),
+    D %>% tally_variable(baseline_cols = baseline_cols, variable = 'smoke_verbose'),
+    D %>% tally_variable(baseline_cols = baseline_cols, variable = 'Gender'),
+    D %>% tally_variable(baseline_cols = baseline_cols, variable = 'age_verbose'),
+    D %>% tally_variable(baseline_cols = baseline_cols, variable = 'race'),
+    D %>% tally_variable(baseline_cols = baseline_cols, variable = 'therapy_binary')
+) %>%
+mutate(variable = ifelse(variable == 'generaltumortype', 'Primary Tumor Subtype', variable)) %>%
+mutate(variable = format_variable(variable)) %>%
+select(-ref) %>%
+kable(format = "latex", booktabs = T) %>%
+kable_styling(
+    latex_options = c("hold_position"),
+    full_width = T,
+    font_size = 10
+) %>%
+column_spec(1, width = 10) %>%
+column_spec(2:5, width = 70) %>%
+collapse_rows(columns = 1:2, row_group_label_position = 'stack') %>%
+display_kable('table1.1.pdf')
+
+D %>% tally_variable(baseline_cols = baseline_cols, variable = 'generaltumortype') %>%
+mutate(variable = ifelse(variable == 'generaltumortype', 'Primary Tumor Subtype', variable)) %>%
+mutate(variable = format_variable(variable)) %>%
+select(-ref) %>%
+kable(format = "latex", booktabs = T) %>%
+kable_styling(
+    latex_options = c("hold_position"),
+    full_width = T,
+    font_size = 10
+) %>%
+column_spec(1, width = 10) %>%
+column_spec(2, width = 200) %>%
+column_spec(3:7, width = 50) %>%
+collapse_rows(columns = 1:2, row_group_label_position = 'stack') %>%
+display_kable('table1.2.pdf')
+```
+
+```{r}
+#Supplementary Table 1
+D = M_wide_all %>% 
+    mutate(therapy_known = ifelse(therapy_known, 'Yes', 'No')) %>%
+    mutate(age_verbose = case_when(
+        is.na(age_cat) ~ 'Missing',
+        T ~ paste0((age_cat - 1) * 10, '-', age_cat * 10))
+    ) %>%
+    mutate(smoke_verbose = case_when(
+        smoke_bin == 1 ~ "Current/Former",
+        smoke_bin == 0 ~ "Non Smoker",
+        T ~ 'Missing')
+    ) %>%
+    mutate(smoke_verbose = relevel(factor(smoke_verbose), ref = 'Non Smoker')) %>%
+    mutate(Gender = relevel(factor(Gender), ref = 'Male')) %>%
+    mutate(generaltumortype = ifelse(
+        generaltumortype == '' | is.na(generaltumortype), 'Missing', generaltumortype)
+    ) %>%
+    mutate(generaltumortype = format_variable(generaltumortype))
+
+label(D$age_verbose) <- "Age(y)"
+label(D$smoke_verbose) <- "Smoking"
+
+table1(~ age_verbose + Gender + smoke_verbose | therapy_known, data=D, output="markdown", export="ktab")
+table1(~ generaltumortype | therapy_known, data=D, output="markdown", export="ktab")
+```
+
+#sFigure 2 mutational landscape
+```{r}
+M_long = M_long %>% 
+    mutate(myeloid_category = case_when(
+      CH_my == 1 ~ "Myeloid Gene",
+      CH_my == 0 ~ "Non-Myeloid Gene"
+    )) %>%
+    mutate(pd_category = case_when(
+      ch_my_pd == 1 ~ "Myeloid PD",
+      ch_my_pd == 0 & ch_pancan_pd == 1 ~ "Non-Myeloid PD",
+      TRUE ~ "Non PD"
+    )) %>%
+    mutate(
+        VariantClass2 = case_when(
+            VariantClass == 'Frame_Shift_Del' ~ 'Frameshift indel',
+            VariantClass == 'Frame_Shift_Ins' ~ 'Frameshift indel',
+            VariantClass == 'In_Frame_Del' ~ 'Inframe indel',
+            VariantClass == 'In_Frame_Ins' ~ 'Inframe indel',
+            VariantClass == 'Splice_Site' ~ 'Splice or other',
+            VariantClass == 'Splice_Region' ~ 'Splice or other',
+            VariantClass == "5'Flank" ~ 'Splice or other',
+            VariantClass == 'Translation_Start_Site' ~ 'Splice or other',
+            VariantClass == 'Nonstop_Mutation' ~ 'Splice or other',
+            VariantClass == 'Missense_Mutation' ~ 'Missense',
+            VariantClass == 'Nonsense_Mutation' ~ 'Nonsense',
+            T ~ VariantClass)
+    )
+
+font_size = 8
+
+lab_pos = 'out'
+
+lab_color = 'black'
+
+panel_theme = theme(
+    legend.direction = 'vertical',
+    legend.position="top", 
+    legend.text = element_text(size=12),
+    plot.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    axis.text = element_text(size = font_size)
+  )
+
+p1 = ggdonutchart(
+    data = M_long %>% filter(myeloid_category != "NA") %>% count(myeloid_category),
+    x = "n", 
+    fill = "myeloid_category", 
+    color = "white",
+    lab.pos = lab_pos,
+    palette = pal_nejm('default')(8),
+    lab.font = c(lab_color, font_size),
+    size = 0.5) +
+    labs(fill = "Gene Class") +
+    labs(title = "B") +
+    panel_theme
+
+p2 = ggdonutchart(
+    data = M_long %>% count(pd_category),
+    x = "n", 
+    fill = "pd_category", 
+    color = "white",
+    lab.pos = lab_pos, 
+    palette = pal_nejm('default')(8),
+    lab.font = c(lab_color, font_size),
+    size = 0.5) +
+    labs(fill = "Mutation Driver Status") +
+     labs(title = "C") +
+  panel_theme
+
+p3 = ggdonutchart(
+    data = M_long %>% count(VariantClass2),
+    x = "n", 
+    fill = "VariantClass2", 
+    color = "white",
+    lab.pos = lab_pos, 
+    palette = pal_nejm('default')(8),
+    lab.font = c(lab_color, font_size),
+    size = 0.5) +
+    labs(fill = "Variant Effect") +
+    labs(title = "D") +
+    panel_theme
+
+p4 = ggdonutchart(
+    data = M_long %>% count(variant_type),
+    x = "n", 
+    fill = "variant_type", 
+    color = "white",
+    lab.pos = lab_pos, 
+    palette = pal_nejm('default')(8),
+    lab.font = c(lab_color, font_size),
+    size = 0.5) +
+    labs(fill = "Variant Type") +
+    labs(title = "E") +
+    panel_theme
+
+p5 = ggdonutchart(
+    data = M_long %>% filter(variant_type == 'SNV') %>% count(sub_nuc),
+    x = "n", 
+    fill = "sub_nuc", 
+    color = "white",
+    lab.pos = lab_pos, 
+    palette = pal_nejm('default')(8),
+    lab.font = c(0.1, "plain", lab_color),
+    size = 0.5) +
+    labs(fill = "Nucleotide Change (SNVs)") +
+    labs(title = "F") +
+    panel_theme
+
+panel = (p1 | p2 | p3 | p4 | p5)
+
+#Top Genes
+
+gene_list = M_long %>% count(Gene) %>% arrange(-n) %>% .$Gene %>% unique %>% .[1:30]
+
+genes <- ggplot(
+    M_long %>% filter(Gene %in% gene_list) %>% 
+    mutate(Gene = factor(Gene, gene_list)) %>%
+    count(Gene, VariantClass2),
+    aes(x = Gene, y = n, fill = VariantClass2)
+) + 
+geom_bar(stat = 'identity', color = 'black', size = 0.2) +
+ylab("Number of Mutations") +
+theme_bw() +
+theme(
+    panel.grid.major = element_blank(), 
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "white"),
+    legend.title = element_blank()
+) +
+theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+scale_fill_nejm() + scale_color_nejm() + labs(title = 'A')
+
+combo = (genes / panel) + plot_layout(ncol = 1, heights = c(1, 1))
+
+do_plot(p = combo, f = "sfig2.png", w = 14, h = 8, save_pdf = T)
+```
+
+#eFigure 1 - tumor types and CH
+```{r}
+rare_tumors <- M_wide_all %>%
+group_by(generaltumortype) %>%
+  summarise(count=n_distinct(STUDY_ID)) %>%
+  arrange(-count)  %>%
+  filter(count<100) %>%
+  pull(generaltumortype) %>%
+  as.character()
+
+D <- M_wide_all %>% mutate(generaltumortype_r=ifelse(generaltumortype %in% rare_tumors,"Other",as.character(generaltumortype)))
+D <-  D %>% mutate(generaltumortype_r = relevel(factor(generaltumortype_r), "Breast Carcinoma"))
+
+N <- as.data.frame(table(D$generaltumortype_r)) %>% dplyr::rename(term = Var1)
+
+logit <- D %>%
+  glm(formula = ch_pancan_pd ~ age + generaltumortype_r, family = binomial(link="logit"), na.action = 'na.omit')
+
+results <- logit %>% get_model_data(type="est")
+
+
+results <- results %>% filter(term!="age") %>% 
+        mutate(term=str_remove(term, "generaltumortype_r")) %>%
+        arrange(estimate) %>%
+        
+        mutate(
+        q.value = p.adjust(p.value, n = nrow(.)),
+        q.label = paste0(signif(estimate, 2), signif.num(q.value)))
+
+results_bind <- left_join(results,N)
+results_bind <- results_bind %>% mutate(term = paste0(term, ' (n = ', Freq, ')'))
+results_bind <- results_bind %>% mutate(term = factor(term, levels = term))
+        
+p = plot_forest(
+      results_bind,
+      x = "term",
+      eb_w = 0,
+      eb_s = 1,
+      ps = 2,
+      or_s = 3,
+      label = 'p.stars'
+  ) +
+  xlab('') + ylab('OR of CH-PD') +
+  scale_fill_nejm() +
+  scale_color_nejm() +
+  scale_x_discrete(expand = c(0.025, 0))
+
+do_plot(p, "efig1.png", 8, 5, save_pdf = T)
+```
+
+#eFigure 2 - prop CH by tumor type
+```{r}
+options(repr.plot.width = 10, repr.plot.height = 6, repr.plot.res = 300)
+
+n_dict = M_wide_all %>% count(generaltumortype) %>%
+    arrange(-n) %>% {setNames(.$n, .$generaltumortype)}
+
+top_genes <- M_long %>%
+group_by(Gene) %>%
+  summarise(count=n_distinct(STUDY_ID)) %>%
+  arrange(-count)  %>%
+  filter(count>75) %>%
+  pull(Gene) %>%
+  as.character()
+
+gene_list <- M_long %>%
+group_by(Gene) %>%
+  summarise(count=n_distinct(STUDY_ID)) %>%
+  arrange(-count)  %>%
+  filter(count>75) %>%
+  pull(Gene)
+
+tumor_list = M_wide_all %>% count(generaltumortype) %>%
+    arrange(-n) %>%
+    top_n(12) %>%
+    pull(generaltumortype) %>%
+    as.character()
+
+D <- M_long %>%
+filter(Gene %in% top_genes) %>%
+count(generaltumortype, Gene) %>%
+filter(!is.na(generaltumortype)) %>%
+group_by(generaltumortype) %>%
+mutate(prop = n/n_dict[generaltumortype]) %>%
+filter(generaltumortype %in% tumor_list) %>%
+ungroup() %>%
+mutate(Gene = factor(Gene, top_genes))
+
+D_wide <- M_wide %>% filter(generaltumortype %in% tumor_list)
+
+p <- D %>%
+ggplot(
+    aes(x = Gene, y = prop, fill = generaltumortype)
+) + 
+geom_bar(stat = 'identity', color = 'black', size = 0.2, position = position_dodge()) +
+theme_bw() +
+theme(
+    legend.position = "top",
+    panel.grid.major = element_blank(), 
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "white"),
+    legend.title = element_blank()
+) +
+theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+scale_fill_brewer(palette = "Paired") +
+ylab('Proportion With Mutation')
+
+do_plot(p, "efig2.png", 8, 5, save_pdf = T)
+```
+#Proportion of mutations by primary tumor site in untreated patients
+```{r}
+options(repr.plot.width = 10, repr.plot.height = 6, repr.plot.res = 300)
+
+D <- M_wide %>% filter(generaltumortype=="Endometrial Cancer" & therapy_binary=="untreated")
+table(D$PPM1D)
+
+D <- M_wide %>% filter(generaltumortype=="Ovarian Cancer" & therapy_binary=="untreated")
+table(D$PPM1D)
+```
+
+#eFigure 3 - therapy distribution
+```{r}
+
+font_size = 13
+
+tumor_list = M_wide_all %>% count(generaltumortype) %>%
+    arrange(-n) %>%
+    top_n(15) %>%
+    pull(generaltumortype) %>%
+    as.character()
+
+D = M_wide %>% 
+    filter(generaltumortype %in% tumor_list) %>%
+    mutate(treatment_type = case_when(
+        XRT == 1 & ind_anychemo == 1 ~ "XRT & Systemic",
+        XRT == 1 ~ "XRT",
+        ind_anychemo == 1 ~ "Systemic Therapy",
+        T ~ "No treatment")) %>%
+    mutate(
+        generaltumortype = factor(
+            generaltumortype,
+            levels = names(sort(table(generaltumortype), decreasing = F)))
+    )
+
+p1 = ggplot(D) + 
+  geom_bar(aes(x = generaltumortype, fill = treatment_type), color = 'black') +
+  theme(
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = font_size),
+      axis.text.y = element_text(size = font_size),
+      legend.position = c(0.8, 0.3),
+      plot.title = element_text(hjust = .5, size = 16), 
+      axis.title=element_text(size = 14),
+      legend.text = element_text(size = font_size),
+      legend.title = element_blank()
+  ) + 
+  ylab("Frequency") +
+  xlab("") +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  coord_flip()+
+  scale_fill_manual(values = c(
+      "No treatment" = 'gray',
+      'Systemic Therapy' = pal_npg()(4)[1],
+      'XRT & Systemic' = pal_npg()(4)[2], 
+      'XRT' = pal_npg()(4)[3]
+    )
+  ) +
+  scale_color_nejm()
+
+D = M_wide %>% mutate(
+        Treatment = case_when(
+            ind_cytotoxic_therapy == 1 & ind_immune_therapy == 0 &
+               ind_targeted_therapy == 0 & ind_radiotherapy == 0 ~ "Only Cytotoxic",
+            ind_cytotoxic_therapy == 0 & ind_immune_therapy == 1 &
+               ind_targeted_therapy == 0 & ind_radiotherapy == 0 ~ "Only Immune",
+            ind_cytotoxic_therapy == 0 & ind_immune_therapy == 1 &
+               ind_targeted_therapy == 1 & ind_radiotherapy == 0 ~ "Only Targeted",
+            ind_cytotoxic_therapy == 0 & ind_immune_therapy == 0 &
+               ind_targeted_therapy == 0 & ind_radiotherapy == 1 ~ "Only Radiotherapy",
+            ind_anychemo == 0 ~ "NA",
+            T ~ "Multiple"
+    )) %>%
+    filter(Treatment != "NA") %>%
+    filter(generaltumortype %in% tumor_list) %>%
+    mutate(
+        generaltumortype = factor(
+            generaltumortype,
+            levels = names(sort(table(generaltumortype), decreasing = F)))
+    )
+
+p2 = ggplot(D) + 
+  geom_bar(aes(x = generaltumortype, fill = Treatment), color = 'black') +
+  xlab("") +
+  theme(
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = font_size),
+      axis.text.y = element_text(size = font_size),
+      legend.position = c(0.8,0.3),
+      plot.title = element_text(hjust = .5, size = 16), 
+      axis.title=element_text(size = 14),
+      legend.text = element_text(size = 13),
+      legend.title = element_blank()
+  ) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  coord_flip() +
+  scale_fill_nejm() +
+  scale_color_nejm()
+
+options(repr.plot.width = 10, repr.plot.height = 5, repr.plot.res = 300)
+
+exclude_list = c(
+    "ind_carboplatin", "ind_oxaliplatin", "ind_cisplatin",
+    "ind_gnrh_antagonist",  "ind_anychemo", "ind_cytotoxic_therapy", 
+    "ind_hormonal_therapy", "ind_antiestrogen", "ind_targeted_therapy",
+    "ind_nitrogen_mustard", "ind_vegf_inhibitor", "ind_aromatase_inhibitor",
+    "ind_immune_checkpoint_in", "ind_anti_pd1_antibody", "ind_carbo_pacli",
+    "ind_antiandrogen", "ind_camptothecins", "ind_epipodophyllotoxins",
+    "ind_vinca_alkaloids", 'ind_protein_kinase_inhib', 'ind_vascular_targeted_th',
+    'ind_immune_therapy'
+)
+
+D = M_wide %>% 
+    select(str_subset(colnames(.), '^ind')) %>%
+    replace(., is.na(.), 0) %>%
+    colSums() %>%
+    as.data.frame %>%
+    setNames('freq') %>%
+    tibble::rownames_to_column('drug')  %>%
+    arrange(-freq) %>%
+    filter(!(drug %in% exclude_list)) %>%
+    filter(!str_detect(drug, regex('_ds_|post'))) %>%
+    mutate(drug = format_variable(drug)) %>%
+    mutate(drug = factor(drug, drug))
+
+p3 = ggplot(
+      D[1:10,]
+  ) + 
+  geom_col(
+      aes(x = drug, y = freq), color = 'black'
+  ) +
+  theme(
+      plot.title = element_text(hjust = .5, size = 16),
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = font_size),
+      axis.title = element_text(size=14),
+      axis.text.y = element_text(size=13)
+  ) +
+  xlab("") + 
+  ylab("Frequency")  +
+  scale_fill_nejm() +
+  scale_color_nejm() +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0))
+
+p <- egg::ggarrange(
+    p1, p2, p3,
+    labels = c('A', 'B', 'C'),
+    label.args = list(gp = grid::gpar(fontface = 'bold', fontsize = 15)),
+    draw = F
+)
+
+do_plot(p, "efig3.png", w = 12, h = 12, save_pdf = T)
+
+#number of pts recieving multiple classes of cytotoxic therapy
+c <- M_wide %>% mutate(sum=ind_platinum+ind_antimetabolite+ind_nucleoside_analogue+ind_taxane+ind_topoisomerase_ii_inh+ind_alkylating_agent+ind_anthracycline+ind_topoisomerase_i_inhi+ind_folic_acid_analog+ind_microtubule_damaging)
+c <- c %>% mutate(mult=ifelse(sum>1,2,sum))
+table(c$mult)
+```
+
+#eTable 2 - associations with CH by PD
+```{r}
+
+#All
+D = M_wide %>% 
+    mutate(smoke_verbose = ifelse(smoke_bin == 1, 'Smoker', 'Non-smoker')) %>%
+    mutate(smoke_verbose = factor(smoke_verbose, c('Non-smoker', 'Smoker'))) %>% 
+    mutate(age = age_d)
+
+summary_all = glm(
+  data=D, 
+  formula = CH_nonsilent ~ age + Gender + smoke_verbose + race + therapy_binary,
+  family = binomial(link = "logit"), 
+  na.action = 'na.omit'
+  ) %>% summar(CI = T, truncate_p = T)
+
+#PD and non-PD
+summary_pd = D %>% 
+    glm(formula = ch_pancan_pd ~ age + Gender + smoke_verbose + race + therapy_binary,
+        family = binomial(link = "logit"), na.action = 'na.omit') %>%
+    summar(CI = T, truncate_p = T)
+
+summary_nonpd = D %>% 
+    glm(formula = ch_nonpd ~ age + Gender + smoke_verbose + race + therapy_binary,
+        family = binomial(link = "logit"), na.action = 'na.omit') %>%
+    summar(CI = T, truncate_p = T)
+
+# PD vs non PD
+summary_pd_het = D %>% filter(CH_all == 1) %>% 
+    glm(formula = ch_pancan_pd ~ age + Gender + smoke_verbose + race + therapy_binary,
+        family = binomial(link="logit"), na.action = 'na.omit') %>%
+    summar(CI = T, truncate_p = T) %>%
+    select(variable, levels, pval)
+
+## all, PD
+summary = Reduce(
+        f = function(x, y) {
+            full_join(x, y, by = c('variable', 'levels'))
+        },
+        x = list(
+            summary_all, 
+            summary_pd, summary_nonpd, summary_pd_het)
+    ) %>%
+    mutate(levels = ifelse(levels == 'Age', '-', levels)) %>%
+    rename(`variable (ref)` = variable) 
+  # rename_all(
+  #       function(x){str_remove(x, '(.x)+|(.y)+')}
+  #   )
+
+summary %>%
+kable(format = "latex", booktabs = T, align = 'l', escape = F) %>%
+kable_styling(
+    latex_options = c("hold_position"),
+    full_width = T,
+    font_size = 10
+) %>%
+column_spec(1, width = 100) %>%
+column_spec(2:50, width = 45) %>%
+add_header_above(
+    c(" " = 2, "All CH" = 3, "Myeloid CH" = 3, "Non-Myeloid CH" = 3,
+      "Heterogeneity" = 1)
+) %>%
+collapse_rows(columns = 1:2, row_group_label_position = 'identity') %>%
+display_kable('etable2.pdf')
+```
+
+#Associations with CH by current/former smoking
+```{r}
+
+D <- M_wide
+
+#ALL
+summary_all = D %>% 
+    glm(formula = CH_nonsilent ~ age + Gender + smoke + race + therapy_binary,
+        family = binomial(link = "logit"), na.action = 'na.omit') %>%
+      get_model_data(type="est")
+
+#ASXL1
+D %>% 
+    glm(formula = ASXL1 ~ age + Gender + smoke + race + therapy_binary,
+        family = binomial(link = "logit"), na.action = 'na.omit') %>%
+         get_model_data(type="est")
+
+# heterogenetiy among smokers
+D %>% filter(smoke_bin == 1) %>% 
+    glm(formula = ASXL1 ~ age + Gender + smoke + race + therapy_binary,
+        family = binomial(link="logit"), na.action = 'na.omit') %>%
+         get_model_data(type="est")
+```
+
+#Supp Figure 3 - CH mutational features and VAF
+```{r}
+treatment_palette = c(pal_nejm()(2)[2], pal_nejm()(2)[1])
+
+ D = M %>% filter(VAF_N < 0.35) %>%
+     filter(CH_nonsilent == 1) %>%
+     mutate(CH_my = ifelse(CH_my == 1, 'Myeloid gene', 'Non-myeloid gene')) %>%
+     mutate(pd_status = ifelse(ch_pancan_pd == 1, 'PD', 'Non-PD')) %>%
+     mutate(pd_status = factor(pd_status))
+
+ D = D %>% group_by(STUDY_ID) %>% dplyr::mutate(mutnum=n())
+
+ D = D %>% mutate(mutnum = ifelse(mutnum > 1, '2+', as.character(mutnum)))
+
+ panel_theme = theme_bw() + theme(
+     panel.grid.minor = element_blank(),
+     panel.border = element_blank(),
+     axis.line = element_line(colour = "black"),
+     legend.title = element_blank(),
+     plot.title = element_text(size = 8)
+ )
+
+#Myeloid
+
+model_my = geeglm(
+     data = D,
+     formula = log(VAF_N) ~ age_scaled + race_b + smoke_bin + therapy_binary + CH_my,
+     family = gaussian,
+     corstr = "exchangeable",
+     id = STUDY_ID)
+
+pval_my = model_my %>% summary %>% coefficients %>% .['CH_myNon-myeloid gene', 'Pr(>|W|)']
+
+df <- D %>% group_by(CH_my) %>% summarise(median=median(VAF_N))
+df
+
+p_my = ggplot(
+        D,
+        aes(y = VAF_N, x = CH_my, fill = therapy_binary)
+    ) + 
+    geom_boxplot(outlier.alpha = 0) +
+    geom_point(position = position_jitterdodge(), pch = 21, color = 'black', size = 1) +
+    panel_theme + xlab("") + ylab('VAF') +
+    scale_fill_manual(values = treatment_palette) +
+    geom_signif(
+      comparisons = list(levels(as.factor(D$CH_my))),
+      y_position = 0.36,
+      vjust = -0.5,
+      tip_length = 0.01,
+      #annotation = paste0('p = ', scientific(pval_my, digits = 2)),
+            #CHANGE THIS
+      annotation = paste0('p = <1x10-6'),
+      map_signif_level = TRUE,
+      textsize = 3
+    ) +
+    scale_y_continuous(expand = c(0.1, 0))
+
+model_pd = geeglm(
+    data = D,
+    formula = log(VAF_N) ~ age_scaled + race + smoke_bin + therapy_binary + ch_pancan_pd,
+    family = gaussian,
+    corstr = "exchangeable",
+    id = STUDY_ID)
+
+pval_pd = model_pd %>% summary %>% coefficients %>% .['ch_pancan_pd', 'Pr(>|W|)']
+
+p_pd = ggplot(
+      D,
+      aes(y = VAF_N, x = pd_status, fill = therapy_binary)
+  ) + 
+  geom_boxplot(outlier.alpha = 0) +
+  geom_point(position = position_jitterdodge(), pch = 21, color = 'black', size = 1) +
+  panel_theme + xlab("") + ylab('VAF') +
+  scale_fill_manual(values = treatment_palette) +
+  geom_signif(
+    comparisons = list(levels(D$pd_status)),
+    y_position = 0.36,
+    vjust = -0.5,
+    tip_length = 0.01,
+    #annotation = paste0('p = ', scientific(pval_pd, digits = 2)),
+      #CHANGE THIS
+      annotation = paste0('p = <1x10-6'),
+    map_signif_level = TRUE,
+    textsize = 3
+  ) +
+  scale_y_continuous(expand = c(0.1, 0))
+
+model_mutnum = geeglm(
+    data = D,
+    formula = log(VAF_N) ~ age_scaled + race + smoke_bin + therapy_binary + mutnum,
+    family = gaussian,
+    corstr = "exchangeable",
+    id = STUDY_ID)
+
+pval_mutnum = model_mutnum %>% summary %>% coefficients %>% .['mutnum2+', 'Pr(>|W|)']
+
+p_mutnum = ggplot(
+      D, 
+      aes(x = factor(mutnum), y = VAF_N, fill = therapy_binary)
+  ) + 
+  geom_boxplot(outlier.alpha = 0) +
+  theme_bw() +
+  theme(
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      strip.background = element_rect(fill = "white", color = 'white'),
+      legend.title = element_blank()
+  ) +
+  ylab('VAF') +
+  geom_point(position = position_jitterdodge(), pch = 21, color = 'black', size = 1) +
+  scale_fill_manual(values = treatment_palette) +
+  xlab('Number of mutations') + 
+  geom_signif(
+    comparisons = list(levels(factor(D$mutnum))),
+    y_position = 0.36,
+    vjust = -0.5,
+    tip_length = 0.01,
+    annotation = paste0('p = ', scientific(pval_mutnum, digits = 2)),
+    map_signif_level = TRUE,
+    textsize = 3
+  ) +
+  scale_y_continuous(expand = c(0.1, 0))
+
+panel <-  ggarrange(
+        p_my, p_pd, p_mutnum, 
+        ncol = 3,
+        nrow = 1,
+        common.legend = TRUE, 
+        legend = "top", align = 'hv',
+        labels = c('A', 'B', 'C')
+    )
+
+do_plot(panel, "SuppFig3.png", w = 9, h = 4, save_pdf = T)
+
+#calculate medians
+
+df <- D %>% group_by(CH_my) %>% summarise(median=median(VAF_N))
+df <- D %>% group_by(ch_pancan_pd) %>% summarise(median=median(VAF_N))
+
+```
+#eTable 3 - associations with VAF
+```{r}
+D = M %>% 
+    filter(!is.na(smoke_bin)) %>%
+    mutate(
+        smoke_bin = factor(ifelse(smoke_bin == 1, 'Smoker', 'Non-smoker'), c('Non-smoker', 'Smoker'))
+    ) %>% 
+    mutate(
+        pd_status = case_when(
+            ch_my_pd==1  ~ "Myeloid PD",
+            ch_nonmy_pd==1 ~ "Non-Myeloid PD",
+            ch_my_pd==0 & ch_nonmy_pd==0 & myeloid_gene==1  ~ "Non-PD Myeloid", 
+            ch_my_pd==0 & ch_nonmy_pd==0 & myeloid_gene==0  ~ "Non-PD Non-Myeloid"
+        )
+    ) %>%
+    mutate(pd_status = relevel(factor(pd_status), ref = 'Non-PD Non-Myeloid')) %>% 
+    group_by(STUDY_ID) %>%
+    mutate(mutnum = as.character(min(n(), 2))) %>%
+    mutate(age = age_d) %>%
+    ungroup()
+
+summary_multi = geeglm(
+    data = D,
+    formula = log(VAF_N) ~ age + race + smoke_bin + therapy_binary + pd_status + mutnum,
+    family = gaussian,
+#    corstr = "exchangeable",
+    id = STUDY_ID
+) %>% summar(truncate_p = T)
+
+summary_multi %>%
+mutate(levels = ifelse(levels == '2', '2+', levels)) %>%
+mutate(levels = ifelse(levels == 'Age', '-', levels)) %>%
+rename(`variable (ref)` = variable) %>%
+kable(
+    format = "latex", booktabs = T, align = 'l', escape = F, linesep = ''
+) %>%
+kable_styling(
+    latex_options = c("basic", "hold_position"),
+    full_width = T,
+    font_size = 10
+) %>%
+column_spec(1:10, width = 120) %>%
+collapse_rows(columns = 1:2, row_group_label_position = 'identity') %>%
+display_kable('etable3.pdf')
+```
+
+#eTable 4 - associations with mutation number
+```{r}
+D = M_wide %>%
+    mutate(
+        race_b = factor(ifelse(race_b == 1, 'White', 'Other'), c('White', 'Other')),
+        smoke_bin = factor(ifelse(smoke_bin == 1, 'Smoker', 'Non-smoker'), c('Non-smoker', 'Smoker')),
+        age = age_d
+    )
+
+summary_all = D %>%
+    filter(mutnum_all > 0) %>%
+    MASS::polr(
+        data = ., 
+        formula = factor(mutnum_all) ~ age_scaled + Gender + race_b + smoke_bin + therapy_binary,
+        Hess = TRUE,
+        method = "logistic") %>%
+    summar(truncate_p = T)
+
+summary_all %>%
+rename(`variable (ref)` = variable) %>%
+mutate(levels = ifelse(levels == 'Age', '-', levels)) %>%
+kable(format = "latex", booktabs = T, align = 'l', escape = F) %>%
+kable_styling(
+    latex_options = c("hold_position"),
+    full_width = T,
+    font_size = 10
+) %>%
+column_spec(1, width = 100) %>%
+column_spec(2:50, width = 40) %>%
+collapse_rows(columns = 1:2, row_group_label_position = 'identity') %>%
+display_kable('etable4.pdf')
+```
+#Supplementary Fig. 5 - mutational characteristics
+```{r}
+
+# Proportion of myeloid mutations
+C = M %>% 
+    mutate(myeloid_category = case_when(
+      CH_my == 1 & CH_nonsilent == 1 ~ "Myeloid Gene",
+      CH_my == 0 & CH_nonsilent == 1 ~ "Non-Myeloid Gene",
+      TRUE ~ "NA"
+    )) %>%
+    count(myeloid_category, therapy_binary) %>%
+    filter(myeloid_category != "NA") %>%
+    group_by(therapy_binary) %>%
+    mutate(total = sum(n)) %>%
+    mutate(proportion = n/total) %>%
+    mutate(myeloid_category = factor(myeloid_category, levels = c('Myeloid Gene', 'Non-Myeloid Gene')))
+
+label_size = 3
+
+p_my = ggplot(
+    C,
+      aes(x = therapy_binary, y = proportion, fill = myeloid_category, label = n)
+  ) + 
+  geom_bar(stat = 'identity') + theme_bw() +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.title = element_blank(),
+  ) + xlab('') + coord_flip() +
+  geom_text(size = label_size, position = position_stack(vjust = 0.5), color = 'white') +
+  theme(strip.background = element_rect(fill = "white", color = 'white')) +
+  scale_fill_nejm() + scale_color_nejm() +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0))
+
+#(b) Proportion of putative drivers
+
+C = M %>%
+    mutate(pd_category = case_when(
+      ch_my_pd == 1 ~ "Myeloid PD",
+      ch_my_pd == 0 & ch_pancan_pd == 1 ~ "Non-Myeloid PD",
+      TRUE ~ "Non PD"
+    )) %>%
+    count(pd_category, therapy_binary) %>%
+    filter(pd_category != "NA") %>%
+    group_by(therapy_binary) %>%
+    mutate(total = sum(n)) %>%
+    mutate(proportion = n/total) %>%
+    mutate(pd_category = factor(pd_category, levels = c('Myeloid PD', 'Non-Myeloid PD', 'Non PD')))
+
+p_pd = ggplot(
+      C,
+      aes(x = therapy_binary, y = proportion, fill = pd_category, label = n)
+  ) + 
+  geom_bar(stat = 'identity') + theme_bw() +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.title = element_blank()
+  ) + xlab('') + coord_flip() +
+  geom_text(size = label_size, position = position_stack(vjust = 0.5), color = 'white') +
+  theme(strip.background = element_rect(fill = "white", color = 'white')) +
+  scale_fill_nejm() + scale_color_nejm() +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0))
+
+#(c) Proportion of silent mutations
+C = M %>%
+    count(CH_silent, therapy_binary) %>%
+    group_by(therapy_binary) %>%
+    mutate(total = sum(n)) %>%
+    mutate(proportion = n/total) %>%
+    mutate(CH_silent = ifelse(CH_silent == 1, 'Silent', 'Non-silent'))
+
+p_silent = ggplot(
+      C,
+      aes(x = therapy_binary, y = proportion, fill = CH_silent, label = n)
+  ) + 
+  geom_bar(stat = 'identity') + theme_bw() +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.title = element_blank()
+  ) + xlab('') + ylab('') + coord_flip() +
+  geom_text(size = label_size, position = position_stack(vjust = 0.5), color = 'white') +
+  theme(strip.background = element_rect(fill = "white", color = 'white')) +
+  scale_fill_nejm() + scale_color_nejm() +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0)) 
+
+#(d) Variant class
+# tally
+D = M %>% mutate(therapy_binary = factor(therapy_binary, c('untreated', 'treated'))) %>%
+    mutate(
+        VariantClass = case_when(
+            VariantClass == 'Frame_Shift_Del' ~ 'Frameshift indel',
+            VariantClass == 'Frame_Shift_Ins' ~ 'Frameshift indel',
+            VariantClass == 'In_Frame_Del' ~ 'Inframe indel',
+            VariantClass == 'In_Frame_Ins' ~ 'Inframe indel',
+            VariantClass == 'Splice_Site' ~ 'Splice or other',
+            VariantClass == 'Splice_Region' ~ 'Splice or other',
+            VariantClass == "5'Flank" ~ 'Splice or other',
+            VariantClass == 'Translation_Start_Site' ~ 'Splice or other',
+            VariantClass == 'Nonstop_Mutation' ~ 'Splice or other',
+            VariantClass == 'Missense_Mutation' ~ 'Missense',
+            VariantClass == 'Nonsense_Mutation' ~ 'Nonsense',
+            T ~ VariantClass)
+    ) %>%
+    group_by(Gene) %>% mutate(n_gene = n()) %>% ungroup() %>%
+    filter(n_gene > 20) %>%
+    arrange(-n_gene) %>% mutate(Gene = factor(Gene, unique(Gene))) %>%
+    count(VariantClass, therapy_binary) %>%
+    group_by(therapy_binary) %>%
+        mutate(total = sum(n)) %>%
+        mutate(proportion = n/total) %>%
+    ungroup()
+
+# plot
+p_vc = ggplot(
+      D,
+      aes(x = therapy_binary, y = proportion, fill = VariantClass, label = n)
+  ) +
+  geom_bar(stat = 'identity') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() + 
+  theme_bw() +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.title = element_blank()
+  ) +
+  scale_fill_nejm() + scale_color_nejm() +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0)) +
+  xlab('') + ylab('') +
+  geom_text(size = label_size, position = position_stack(vjust = 0.5), color = 'white')
+
+#(e) Nucleotide substitution
+C = M %>% filter(variant_type == 'SNV') %>%
+    count(sub_nuc, therapy_binary) %>%
+    group_by(therapy_binary) %>%
+    mutate(total = sum(n)) %>%
+    mutate(proportion = n/total) 
+
+p_nuc = ggplot(
+      C,
+      aes(x = therapy_binary, y = proportion, fill = sub_nuc, label = n)
+  ) + 
+  geom_bar(stat = 'identity') + theme_bw() +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.title = element_blank()
+  ) + xlab('') + coord_flip() +
+  geom_text(size = label_size, position = position_stack(vjust = 0.5), color = 'white') +
+  scale_fill_nejm() + scale_color_nejm() +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0))
+# grid.arrange(p_nuc, p_type, ncol = 1)
+
+#(f) Mutation type vs treatment type
+C = M %>% filter(variant_type %in% c('INS', 'DEL', 'SNV')) %>%
+    mutate(
+        treatment_type = case_when(
+            XRT == 0 & ind_anychemo == 1 ~ "Chemo no XRT",
+            XRT == 1 ~ "XRT",
+            XRT == 0 & ind_anychemo == 0 ~ "No treatment",
+            T ~ "NA")
+    ) %>%
+    filter((!is.na(treatment_type)) & (treatment_type != 'NA')) %>%
+    mutate(treatment_type = factor(treatment_type, levels = c('Chemo no XRT', 'XRT', 'No treatment'))) %>%
+    count(variant_type, treatment_type) %>%
+    group_by(treatment_type) %>%
+    mutate(total = sum(n)) %>%
+    mutate(proportion = n/total) 
+
+p_indel = ggplot(
+      C,
+      aes(x = treatment_type, y = proportion, fill = variant_type, label = n)
+  ) + 
+  geom_bar(stat = 'identity') + theme_bw() +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black"),
+      legend.title = element_blank()
+  ) + xlab('') + coord_flip() +
+  geom_text(size = label_size, position = position_stack(vjust = 0.5), color = 'white') +
+  scale_fill_nejm() + scale_color_nejm() +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0))
+
+#(g) Indel length
+C = M %>% filter(variant_type %in% c('DEL', 'INS')) %>%
+    mutate(
+        treatment_type = case_when(
+            XRT == 0 & ind_anychemo == 1 ~ "Chemo no XRT",
+            XRT == 1 ~ "XRT",
+            XRT == 0 & ind_anychemo == 0 ~ "No treatment",
+            T ~ "NA")
+    ) %>%
+    mutate(treatment_type = factor(treatment_type, levels = c('Chemo no XRT', 'XRT', 'No treatment'))) %>%
+    mutate(indel_length = as.numeric(End) - as.numeric(Start)) %>%
+    mutate(
+        indel_length_bin = cut(
+            x = indel_length,
+            breaks = c(-Inf, 1, 5, Inf),
+            labels = c('1', '2-5', '>5'))
+    ) %>%
+    count(indel_length_bin, treatment_type) %>%
+    group_by(treatment_type) %>%
+    mutate(total = sum(n)) %>%
+    mutate(proportion = n/total) 
+
+p_len = ggplot(
+      C,
+      aes(x = treatment_type, y = proportion, fill = indel_length_bin, label = n)
+  ) + 
+  geom_bar(stat = 'identity') + theme_bw() +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(colour = "black")
+  ) + xlab('') + coord_flip() +
+  geom_text(size = label_size, position = position_stack(vjust = 0.5), color = 'white') +
+  guides(fill = guide_legend(title = 'Indel Length (nts)')) +
+  scale_fill_nejm() + scale_color_nejm() +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0))
+
+panel = ggarrange(p_my, p_pd, p_silent, p_nuc, p_indel, p_len, p_vc,
+          ncol = 2, nrow = 4, common.legend = F, legend = "top", align = 'hv', labels = 'AUTO')
+
+do_plot(panel, 'supp_fig5.png', w = 11, h = 9, save_pdf = T)
+```
+
+```{r}
+#Supplementary Figure 4 Hotspot R882H
+
+D <- M_long %>% filter(CH_nonsilent == 1)
+D <- M_long %>% mutate(dnmt3a_status=case_when(
+  Gene=="DNMT3A" & AAchange=="p.R882H" ~ 'R882H',
+  Gene=="DNMT3A" & AAchange=="p.R882C" ~ 'R882C',
+  Gene=="DNMT3A" ~ 'Other'
+  ))
+
+D <- D %>% filter(Gene=="DNMT3A" & therapy_known==1)
+
+p<- ggplot(
+    D, 
+    aes(x = factor(dnmt3a_status), y = VAF_N, fill = therapy_binary)
+) + geom_boxplot(outlier.alpha = 0) +
+theme_bw() +
+theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = 'white'),
+    legend.title = element_blank()
+) +
+geom_point(position = position_jitterdodge(), pch = 21, color = 'black', size = 1) +
+xlab("DNMT3A Mutation Amino Acid Change") +
+ylab("VAF") +
+scale_fill_nejm() + scale_color_nejm()
+
+do_plot(p, 'supp_fig4.png', w = 11, h = 9, save_pdf = T)
+
+#Perform Regression
+D_nomiss<- na.omit(subset(D, select = c(VAF_N, age, race, smoke_bin, STUDY_ID, dnmt3a_status, therapy_binary)))
+
+geeglm(
+    data = D_nomiss,
+    formula = log(VAF_N) ~ age + race + smoke_bin + factor(dnmt3a_status) + factor(therapy_binary),
+    family = gaussian,
+    corstr = "exchangeable",
+    id = STUDY_ID) %>%
+get_model_data(type="est")
+```
+
+```{r}
+##Supplementary Figure 3
+##Heterogenetiy in OR for clinical Characteristics by Gene
+#Plotting theme
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 8),
+    plot.title = element_text(face = 'bold', hjust = 0, vjust = -2, size = 8),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    axis.title = element_text(size = 8),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+#Age
+
+genelist1 = c("PPM1D","TP53","CHEK2","DNMT3A","TET2","ASXL1","ATM", "SRSF2", "SF3B1", "JAK2")
+genelist2 = c("PPM1D","TP53","CHEK2","DNMT3A","TET2","ASXL1","ATM", "SRSF2", "SF3B1", "JAK2")
+
+D <- M_wide
+
+vars = NULL
+
+for (gene1 in genelist1) {
+  for (gene2 in genelist2) {
+    if ((M_wide %>% filter(!!as.name(gene1)==1) %>% count(.data[[gene1]]) %>% pull(n)) > (M_wide %>% filter(!!as.name(gene2)==1) %>% count(.data[[gene2]]) %>% pull(n))) {
+      var=(paste(gene1,gene2,sep="_"))
+      vars = c(vars,var)
+     D <- D %>% mutate(!!sym(var) :=case_when(!!as.name(gene1)==1 & !!as.name(gene2)==1 ~ 999,
+                                           !!as.name(gene1)==1 ~ 0,
+                                           !!as.name(gene2)==1 ~ 1))
+    }
+  }
+}
+
+D <- D %>%  mutate_at(.vars = vars, 
+            .funs = gsub,
+            pattern = 999,
+            replacement = NA)
+
+D <- D %>%  mutate_at(.vars = vars, 
+            .funs = as.numeric)
+
+logit_gene_var = list()
+
+for (gene in vars) {
+    logit = glm(
+        formula = get(gene) ~ age_scaled + smoke_bin + race_b + Gender + therapy_binary,
+        data = D,
+        family = binomial(link = "logit"), na.action = 'na.omit')
+    print(gene)
+    logit_data = logit %>% sjPlot::get_model_data(type="est") %>% cbind(Gene = gene)
+    logit_gene_var = rbind(logit_gene_var, logit_data)
+}
+
+logit_gene_var <- logit_gene_var %>%    mutate(p_fdr = p.adjust(p.value, method = "fdr")) %>%
+    mutate(log_or = log(estimate)) %>% separate(Gene, c("Gene1", "Gene2"))
+
+#AGE
+
+D <- logit_gene_var %>% filter(term=="age_scaled")
+
+age = ggplot(
+        D,
+        aes(x = Gene2, y = Gene1, fill = log_or)
+    ) +
+    geom_tile(color = "lightgrey") +
+    scale_fill_gradient2(
+        low = "darkblue",
+        mid = "white",
+        high = "darkred", 
+        midpoint = 0, 
+        na.value = "white",
+        limits = c(-2.5, 2.5)
+        
+    ) +
+    geom_point(
+        aes(size = ifelse(p_fdr <= 0.05, 1, NA)),
+        shape = 8, 
+        colour = "black",
+        show.legend = F
+    ) +
+    scale_size_area(max_size = 2) +
+    xlab('Alternate Gene') +
+    ylab('Reference Gene') +
+  #  title("Age") +
+    panel_theme +
+    scale_y_discrete(expand = c(0,0)) +
+    scale_x_discrete(expand = c(0,0)) +
+    ggtitle('Age') +
+    theme(
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'right',
+        axis.text.x = element_text(size = 6, angle = 30, hjust = 1),
+        axis.text.y = element_text(size = 6),
+        plot.margin = unit(c(8, 0, 8, 0), 'pt'),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(8, "pt")
+    )
+
+#Therapy
+
+D <- logit_gene_var %>% filter(term=="therapy_binarytreated")
+
+therapy = ggplot(
+        D,
+        aes(x = Gene2, y = Gene1, fill = log_or)
+    ) +
+    geom_tile(color = "lightgrey") +
+    scale_fill_gradient2(
+        low = "darkblue",
+        mid = "white",
+        high = "darkred", 
+        midpoint = 0, 
+        na.value = "white",
+        limits = c(-2.5, 2.5)
+        
+    ) +
+    geom_point(
+        aes(size = ifelse(p_fdr <= 0.05, 1, NA)),
+        shape = 8, 
+        colour = "black",
+        show.legend = F
+    ) +
+    scale_size_area(max_size = 2) +
+    xlab('Alternate Gene') +
+    ylab('Reference Gene') +
+    ggtitle('Therapy') +
+    panel_theme +
+    scale_y_discrete(expand = c(0,0)) +
+    scale_x_discrete(expand = c(0,0)) +
+    theme(
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'right',
+        axis.text.x = element_text(size = 6, angle = 30, hjust = 1),
+        axis.text.y = element_text(size = 6),
+        plot.margin = unit(c(8, 0, 8, 0), 'pt'),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size =8),
+        legend.key.size = unit(8, "pt")
+    )
+
+#Smoking
+
+D <- logit_gene_var %>% filter(term=="smoke_bin1")
+
+smoking = ggplot(
+        D,
+        aes(x = Gene2, y = Gene1, fill = log_or)
+    ) +
+    geom_tile(color = "lightgrey") +
+    scale_fill_gradient2(
+        low = "darkblue",
+        mid = "white",
+        high = "darkred", 
+        midpoint = 0, 
+        na.value = "white",
+        limits = c(-2.5, 2.5)
+        
+    ) +
+    geom_point(
+        aes(size = ifelse(p_fdr <= 0.05, 1, NA)),
+        shape = 8, 
+        colour = "black",
+        show.legend = F
+    ) +
+    scale_size_area(max_size = 2) +
+    xlab('Alternate Gene') +
+    ylab('Reference Gene') +
+    ggtitle('Smoking') +
+    panel_theme +
+    scale_y_discrete(expand = c(0,0)) +
+    scale_x_discrete(expand = c(0,0)) +
+    theme(
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'right',
+        axis.text.x = element_text(size = 6, angle = 30, hjust = 1),
+        axis.text.y = element_text(size = 6),
+        plot.margin = unit(c(8, 0, 8, 0), 'pt'),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(8, "pt")
+
+    )
+
+combo <- age + therapy + smoking +
+guide_area() + 
+  plot_layout(guides = 'collect')
+
+do_plot(combo, "SuppFig3.png", w = 5, h = 6, save_pdf = T)
+```
+## Chemo and XRT by time tx CH-PD (Figure not included)
+```{r}
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 4),
+    plot.title = element_text(face = 'bold', hjust = 0, vjust = -2, size = 4),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+# Compute buckets of chemo times and limit to people who got cytotoxic therapy or were untreated without radiation therapy
+D <- M_wide %>% filter(XRT==0 & ind_radiotherapy==0) %>%
+  mutate(time_cytotoxic_therapy_r= 
+  cut(time_cytotoxic_therapy, 
+      breaks=c(Inf,1800,720,365,180,0),
+      labels = c(1, 2, 3, 4, 5)))
+
+
+time_chemo_steps <- D$time_cytotoxic_therapy_r %>% unique() %>% sort
+
+logit_time_var = list()
+for (t in time_chemo_steps) {
+  D_step <- D %>% filter(time_cytotoxic_therapy_r==t | ind_cytotoxic_therapy==0)
+  logit <- glm(formula = ch_pancan_pd ~ pct_cytotoxic_therapy + age_scaled + smoke_bin + race_b, 
+               data = D_step,
+               family = binomial(link="logit"), na.action = 'na.omit')
+  logit_data <- logit %>% sjPlot::get_model_data(type="est") %>% cbind(Time = t) %>% cbind(N=nrow(filter(D_step,time_cytotoxic_therapy_r==t)))
+  logit_time_var = rbind(logit_time_var, logit_data)
+}
+
+C <- logit_time_var %>%  filter(!(term %in% c("age_scaled", "smoke_bin1", "race_b"))) %>% 
+    mutate(Time_cat = case_when(
+        Time == 1 ~ "Less than 6 months", 
+        Time == 2 ~ "6-12 months",
+        Time == 3 ~ "1-2 years",
+        Time == 4 ~ "2-5 years",
+        Time == 5 ~ "5 or more years")
+    ) %>%
+    mutate(Time_cat = paste(Time_cat,"(N=",N,")")) %>%
+    mutate(Time=as.numeric(Time)) %>% 
+    mutate(Time_cat = factor(Time_cat, levels=unique(Time_cat[order(-Time)])))
+  
+
+p1 = C %>%
+  plot_forest(
+      x = "Time_cat",
+      #label = "p.stars",
+      eb_w = 0,
+      eb_s = 2,
+      ps = 2,
+      or_s = 5,
+      nudge = -0.5
+  ) +
+  scale_x_discrete(expand = c(0,1)) +
+  ylab("OR of CH-PD for Cytotoxic Therapy") +
+  xlab("Time from End Of cytotoxic Therapy") +
+  panel_theme +
+  theme(plot.margin = unit(c(0,10,0,0), 'pt')) +
+  ggtitle("A")
+
+#test of heterogeneity among those with chemo
+#Is effect of time significant in those who got cytotoxic therapy?
+  logit <- D %>% filter(ind_cytotoxic_therapy==1) %>%
+    glm(formula = ch_pancan_pd ~ pct_cytotoxic_therapy + as.factor(time_cytotoxic_therapy_r) + age + smoke_bin + race_b + timedx_impact, family = binomial(link="logit"), na.action = 'na.omit')
+  tab_model(logit)
+
+# Compute buckets of XRT times and limit to people who got XRT wihtout radioisotope therapy or chemotherapy
+D <- M_wide %>%  filter(ind_cytotoxic_therapy==0 & ind_radiotherapy==0) %>%
+  mutate(time_end_xrt_r= 
+  cut(time_end_xrt, 
+      breaks=c(Inf,720,180,0),
+      labels = c(1, 2, 3)))
+
+
+time_xrt_steps <- D$time_end_xrt_r %>% unique() %>% sort
+
+logit_time_var = list()
+for (t in time_xrt_steps) {
+  D_step <- D %>% filter(time_end_xrt_r==t | eqd_3_t==0)
+  logit <- glm(formula = ch_pancan_pd ~ eqd_3_t + age_scaled + smoke_bin + race_b, 
+               data = D_step,
+               family = binomial(link="logit"), na.action = 'na.omit')
+  logit_data <- logit %>% sjPlot::get_model_data(type="est") %>% cbind(Time = t) %>% cbind(N=nrow(filter(D_step,time_end_xrt_r==t)))
+  logit_time_var = rbind(logit_time_var, logit_data)
+}
+
+C <- logit_time_var %>%  filter(!(term %in% c("age_scaled", "smoke_bin1", "race_b"))) %>% 
+    mutate(Time_cat = case_when(
+        Time == 1 ~ "Less than 6 months", 
+        Time == 2 ~ "6 months-2 years",
+        Time == 3 ~ "2 or more years")
+    ) %>%
+    mutate(Time_cat = paste(Time_cat,"(N=",N,")")) %>%
+    mutate(Time=as.numeric(Time)) %>% 
+    mutate(Time_cat = factor(Time_cat, levels=unique(Time_cat[order(-Time)])))
+  
+p2 = C %>%
+  plot_forest(
+      x = "Time_cat",
+      #label = "p.stars",
+      eb_w = 0,
+      eb_s = 2,
+      ps = 2,
+      or_s = 5,
+      nudge = -0.5
+  ) +
+    scale_x_discrete(expand = c(0.025, 0)) +
+  ylab("OR of CH-PD with EQD2") +
+  xlab("Time from End Of External Beam Radiation Therapy") + 
+ panel_theme +
+      theme(plot.margin = unit(c(0,0,0,10), 'pt')) +
+  ggtitle("B")
+
+#test of heterogeneity among people who got XRT
+#Is effect of time significant in those who got XRT?
+logit <- D %>% filter(XRT==1) %>%
+    glm(formula = ch_pancan_pd ~ eqd_3_t + time_end_xrt_r + age + smoke_bin + race_b, family = binomial(link="logit"),na.action = 'na.omit')
+  tab_model(logit)
+```
+# VAF and time since end of chemo and XRT (Figure not included)
+```{r}
+
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "none",
+ #   panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 8),
+    plot.title = element_text(face = 'bold', hjust = 0, vjust = -2, size = 12),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(size = 12, angle = 30, hjust = 1),
+    axis.title = element_text(size = 12),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+#Chemo
+
+D <- M_long %>% filter(pct_cytotoxic_therapy!=0 & !is.na(time_cytotoxic_therapy)) %>% filter(XRT==0 & ind_radiotherapy==0 & therapy_known==1) %>%
+  mutate(Time= 
+  cut(time_cytotoxic_therapy, 
+      breaks=c(Inf,1800,720,365,180,-1),
+      labels = c(1, 2, 3, 4, 5))) %>%
+mutate(Time_cat = case_when(
+        Time == 1 ~ "Less than 6 months", 
+        Time == 2 ~ "6-12 months",
+        Time == 3 ~ "1-2 years",
+        Time == 4 ~ "2-5 years",
+        Time == 5 ~ "5 or more years")
+    ) %>%
+    mutate(Time=as.numeric(Time)) %>% 
+    mutate(Time_cat = factor(Time_cat, levels=unique(Time_cat[order(Time)])))
+
+model_ch = geeglm(
+    data = D,
+    formula = log(VAF_N) ~ age_scaled + race + smoke_bin + time_cytotoxic_therapy + pct_cytotoxic_therapy,
+    family = gaussian,
+    corstr = "exchangeable",
+    id = STUDY_ID)
+
+model_ch %>% summary 
+
+
+p3 <- ggplot(
+        D,
+        aes(y = VAF_N, x = Time_cat, fill = Time_cat)
+    ) + 
+    geom_boxplot(outlier.alpha = 0) +
+    geom_point(position = position_jitterdodge(), pch = 21, color = 'black', size = 1) +
+    panel_theme + xlab("Time from End Of cytotoxic Therapy") + ylab('VAF') +
+    scale_y_continuous(expand = c(0.1, 0))
+
+
+#XRT
+
+D <- M_long %>% filter(eqd_3_t!=0 & !is.na(time_end_xrt)) %>% filter(ind_cytotoxic_therapy==0 & ind_radiotherapy==0 & therapy_known==1) %>%
+  mutate(Time= 
+  cut(time_end_xrt, 
+      breaks=c(Inf,720,180,-1),
+      labels = c(1, 2, 3))) %>%
+  mutate(Time_cat = case_when(
+        Time == 1 ~ "Less than 6 months", 
+        Time == 2 ~ "6 months-2 years",
+        Time == 3 ~ "2 or more years")
+    ) %>%
+    mutate(Time=as.numeric(Time)) %>% 
+    mutate(Time_cat = factor(Time_cat, levels=unique(Time_cat[order(Time)])))
+
+model_ch = geeglm(
+    data = D,
+    formula = log(VAF_N) ~ age_scaled + race + smoke_bin + time_end_xrt + eqd_3_t,
+    family = gaussian,
+    corstr = "exchangeable",
+    id = STUDY_ID)
+
+model_ch %>% summary 
+
+p4 <- ggplot(
+        D,
+        aes(y = VAF_N, x = Time_cat, fill = Time_cat)
+    ) + 
+    geom_boxplot(outlier.alpha = 0) +
+    geom_point(position = position_jitterdodge(), pch = 21, color = 'black', size = 1) +
+    panel_theme + xlab("Time from End of External Beam Radiation Therapy") + ylab('VAF') +
+    scale_y_continuous(expand = c(0.1, 0))
+
+combo <- p1 + p2 + p3 + p4
+do_plot(combo, 'sfigx.png', w = 10, h = 4, save_pdf = T)
+```
+
+#eFigure 4 - drugset and CH
+```{r}
+drug_sets =
+    get_chemo_column(
+        class_dict, 
+        drugsets_dict,
+        class = 'sets',
+        prefix = 'ind'
+    ) %>%
+    {.[. %in% colnames(M_wide)]} %>%
+    paste(collapse = ' + ')
+
+M_wide = M_wide %>% mutate(sumSets = rowSums(select(., contains("ind_ds"))))
+
+#ind multivariate
+formula = paste0('ch_pancan_pd ~ ', drug_sets, ' + XRT + age + smoke_bin + race_b + timedx_impact')
+ 
+D = M_wide %>% glm(formula = as.formula(formula), family = binomial(link="logit"), na.action = 'na.omit') %>%
+    sjPlot::get_model_data(type = "est",model = .) %>%
+    cbind(Group = "multi") %>%
+    mutate(Drug = term) %>%
+    filter(!(term %in% c("age", "smoke_bin1", "race_b", "timedx_impact", "XRT"))) %>% 
+    mutate(Drug = case_when(
+        Drug == "ind_ds_carboplatin" ~ "Carboplatin", 
+        Drug == "ind_ds_irino_oxali" ~ "Irinotecan Oxaliplatin",
+        Drug == "ind_ds_docetaxel" ~ "Docetaxel",
+        Drug == "ind_ds_irinotecan" ~ "Irinotecan",
+        Drug == "ind_ds_cis_gem" ~ "Cisplatin Gemcitabine",
+        Drug == "ind_ds_gemcitabine" ~ "Gemcitabine",
+        Drug == "ind_ds_cisplatin" ~ "Cisplatin",
+        Drug == "ind_ds_floxuridine" ~ "Floxuridine",
+        Drug == "ind_ds_doxorubicin" ~ "Doxorubicin",
+        Drug == "ind_ds_cyclo_doxo" ~ "Cyclophosphamide Doxorubicin",
+        Drug == "ind_ds_oxaliplatin" ~ "Oxaliplatin",
+        Drug == "ind_ds_abr_gem" ~ "Abraxane Gemcitabine",
+        Drug == "ind_ds_paclitaxel" ~ "Paclitaxel",
+        Drug == "ind_ds_fluo_oxali" ~ "Fluorouracil Oxaliplatin",
+        Drug == "ind_ds_carbo_doxo" ~ "Carboplatin Doxorubicin",
+        Drug == "ind_ds_carbo_pem" ~ "Carboplatin Pemetrexed",
+        Drug == "ind_ds_carbo_pacli" ~ "Carboplatin Paclitaxel",
+        Drug == "ind_ds_cis_pem" ~ "Cisplatin Pemetrexed",
+        Drug == "ind_ds_carbo_gem" ~ "Carboplatin Gemcitabine",
+        Drug == "ind_ds_cis_etop" ~ "Cisplatin Etoposide",
+        Drug == "ind_ds_cytotoxic_other" ~ "Other Cytotoxic Drugset")
+    ) %>%
+    mutate(
+        Drug = factor(Drug, levels=unique(Drug[order(estimate)]))
+    )
+
+drug_sets_list=
+    get_chemo_column(
+        class_dict, 
+        drugsets_dict,
+        class = 'sets',
+        prefix = 'ind')
+
+p = D %>%
+  plot_forest(
+      x = "Drug",
+      label = "p.stars",
+      eb_w = 0,
+      eb_s = 1,
+      ps = 2,
+      or_s = 3.1,
+      nudge = -0.5
+  ) +
+  scale_x_discrete(expand = c(0,1)) +
+  ylab("OR of CH-PD") +
+  xlab("Regimen") +
+  scale_fill_nejm() +
+  scale_color_nejm()
+
+do_plot(p, 'efig4.png', w = 6, h = 4, save_pdf = T)
+
+```
+# Tabulate serial
+```{r}
+#Tabulate serial
+print('All patients')
+nrow(P_serial)
+print('All mutations')
+nrow(M2_all)
+print('Therapy Binary')
+table(P_serial$therapy_binary)
+print('# of Mutation Positive Patients')
+unique(M2_all$STUDY_ID) %>% length()
+print('Describe FU')
+psych::describe(P_serial$delta_time)
+print('# of Patients who got treatment')
+sum(P_serial$therapy_binary)
+print('# of Patients who got no cyto/xrt')
+filter(P_serial,therapy_binary==0) %>% nrow()
+print('Number of Patients with CH at inital timepoint')
+det <- filter(M2_all,VAF_1>0) 
+unique(det$STUDY_ID) %>% length()
+print('Number of mutations detected at both timepoints')
+filter(M2_all,VAF_1>0 & VAF_2>0) %>% nrow()
+print('Number of mutations detected at only one timepoint')
+nrow(filter(M2_all,VAF_1==0 | VAF_2==0))
+print('Number of mutations detected at first timepoint only')
+nrow(filter(M2_all,VAF_1>0 & VAF_2==0)) 
+print('Number of mutations detected at second timepoint only')
+nrow(filter(M2_all,VAF_1==0 & VAF_2>0)) 
+print('Number of newly detected mutations after tx')
+new_tx <- filter(M2_all,VAF_1==0 & VAF_2>=0.02 & therapy_binary==1)
+unique(new_tx$STUDY_ID) %>% length()
+print('Number of newly detected mutations after no tx')
+new_tx <- filter(M2_all,VAF_1==0 & VAF_2>0 & therapy_binary==0)
+unique(new_tx$STUDY_ID) %>% length()
+print('Table of direction')
+table(M2$direction)
+
+```
+
+#Supplementary Figure 8 - GR and mutnum
+```{r}
+
+p = ggplot(
+      M2 %>%
+          group_by(STUDY_ID) %>%
+          mutate(n_mut = n()) %>%
+          mutate(any_ddr_CH = ifelse(any(ddr_CH), 'DDR', 'Other')) %>%
+          ungroup() %>%
+          filter(n_mut <= 4) %>%
+          mutate(therapy = recode(therapy_binary, `1` = 'treated', `0` = 'untreated')) %>%
+          mutate(therapy = factor(therapy, levels = c('untreated', 'treated'))) %>%
+      {rbind(
+        .,
+        mutate(., any_ddr_CH = 'All')
+      )},
+      aes(x = n_mut, y = log(growth_rate), group = factor(n_mut))) +
+  geom_boxplot(outlier.alpha = 0, color = 'black', fill = 'steelblue') +
+  geom_jitter(
+      pch = 21, 
+      size = 1,
+      alpha = 0.8, 
+      width = 0.1,
+      color = 'black',
+      fill = 'gray'
+  ) +
+  panel_theme +
+  theme(
+    legend.position = "none", 
+    strip.background = element_rect(fill = 'grey', size = 0),
+    panel.border = element_rect(color = "grey", fill = NA, size = 1),
+    strip.text = element_text(size = 10)
+    
+  ) +
+  facet_grid(vars(any_ddr_CH), vars(therapy)) +
+  # scale_fill_nejm() + scale_color_nejm() +
+  xlab('number of mutations') +
+  ylab('log growth rate')
+
+do_plot(p, 'supp8.png', w = 6, h = 6, save_pdf = T)
+```
+
+#Supplementary Figure 9 - bar chart singletons
+```{r}
+
+D = P_serial %>% left_join(
+  M2_all %>% group_by(STUDY_ID) %>%
+      summarise(
+      ch_t1 = any(VAF_1 >= 0.02),
+      ch_t2 = any(VAF_2 >= 0.02),
+      ddr_CH_t1 = any(ddr_CH & VAF_1 >= 0.02),
+      ddr_CH_t2 = any(ddr_CH & VAF_2 >= 0.02),
+      non_ddr_CH_t1 = any(!ddr_CH & VAF_1 >= 0.02),
+      non_ddr_CH_t2 = any(!ddr_CH & VAF_2 >= 0.02),
+      ddr_CH_gain = any(ddr_CH & VAF_1 != 0 & VAF_1 < 0.02 & VAF_2 >= 0.02),
+      other_gain = any(!ddr_CH & VAF_1 != 0 & VAF_1 < 0.02 & VAF_2 >= 0.02),
+      ddr_CH_loss = any(ddr_CH & VAF_1 >= 0.02 & VAF_2 < 0.02),
+      ddr_CH_loss_complete = any(ddr_CH & VAF_1 >= 0.02 & VAF_2 == 0),
+      any_loss_complete = any(VAF_1 >= 0.02 & VAF_2 == 0),
+      other_loss = any(!ddr_CH & VAF_1 >= 0.02 & VAF_2 < 0.02),
+      other_loss_complete = any(!ddr_CH & VAF_1 >= 0.02 & VAF_2 == 0),
+      ddr_CH_denovo = any(ddr_CH & VAF_1 == 0 & VAF_2 >= 0.02),
+      other_denovo = any(!ddr_CH & VAF_1 == 0 & VAF_2 >= 0.02),
+      any_denovo = any(VAF_1 == 0 & VAF_2 >= 0.02)
+    ),
+  by = 'STUDY_ID',
+) %>%
+  mutate_at(
+    c('ch_t1', 'ch_t2', 'ddr_CH_t1', 'ddr_CH_t2',
+      'non_ddr_CH_t1', 'non_ddr_CH_t2', 
+      'ddr_CH_gain', 'other_gain', 'ddr_CH_loss', 'other_loss',
+      'ddr_CH_denovo', 'other_denovo'),
+    function(x){tidyr::replace_na(x, FALSE)}
+  )
+
+D_loss = D %>% 
+    mutate(
+        ddr_CH = case_when(
+            ddr_CH_loss_complete ~ 'complete loss',
+            # ddr_CH_loss ~ 'loss',
+            T ~ 'none'
+        ),
+        other = case_when(
+            other_loss_complete ~ 'complete loss',
+            # other_loss ~ 'loss',
+            T ~ 'none'
+        ),
+        any = case_when(
+            any_loss_complete ~ 'complete loss',
+            # other_loss ~ 'loss',
+            T ~ 'none'
+        )
+    ) %>%
+    melt(measure.vars = c('ddr_CH', 'other', 'any'),
+        variable.name = 'gene',
+        value.name = 'event_type') %>%
+    count(therapy_binary, gene, event_type) %>%
+    group_by(therapy_binary, gene) %>%
+    mutate(total = sum(n), prop = n/total)
+
+D_gain = D %>% mutate(
+        ddr_CH = case_when(
+            ddr_CH_denovo ~ 'newly observed',
+            T ~ 'none'
+        ),
+        other = case_when(
+            other_denovo ~ 'newly observed',
+            T ~ 'none'
+        ),
+        any = case_when(
+            any_denovo ~ 'newly observed',
+            T ~ 'none'
+        )
+    ) %>%
+    melt(measure.vars = c('ddr_CH', 'other', 'any'),
+         variable.name = 'gene',
+         value.name = 'event_type') %>%
+    count(therapy_binary, gene, event_type) %>%
+    group_by(therapy_binary, gene) %>%
+    mutate(total = sum(n), prop = n/total) 
+
+D2 = rbind(
+        D_gain %>% mutate(event = 'gain'),
+        D_loss %>% mutate(event = 'loss')
+    ) %>%
+    filter(event_type != 'none') %>%
+    mutate(event_type = factor(event_type, c('gain', 'newly observed', 'loss', 'complete loss'))) %>%
+    ungroup() %>%
+    mutate(therapy_binary = ifelse(therapy_binary == 1, 'treated', 'untreated')) %>%
+    mutate(gene = case_when(gene == 'ddr_CH' ~ 'DDR',
+                            gene == 'other' ~ 'Other',
+                            gene == 'any' ~ 'Any'))
+D2 <- filter(D2,gene=="Any")
+
+p = ggplot(
+   D2,
+    aes(x = therapy_binary,
+        y = prop,
+        label = n)
+) +
+geom_bar(stat = 'identity', color = 'black', size = 0.2) +
+geom_text(
+    size = 3,
+    color = 'white',
+    position = position_stack(vjust = 0.5)
+) +
+facet_grid(~event_type) +
+theme(
+    # strip.background = element_rect(fill = 'white', color = 'black'),
+    legend.title = element_blank()
+) +
+xlab('') +
+ylab('proportion of patients') +
+scale_fill_nejm()
+
+do_plot(p, "supp_fig9.png", w = 6, h = 4, save_pdf = T)
+
+D2 %>% filter(event_type=="newly observed") %>%
+group_by(event_type, therapy_binary) %>%
+summarise(n = sum(n), total = sum(unique(total))) %>%
+  {prop.test(.$n, .$total)}
+
+D2 %>% filter(event_type=="complete loss") %>%
+group_by(event_type, therapy_binary) %>%
+summarise(n = sum(n), total = sum(unique(total))) %>%
+{prop.test(.$n, .$total)}
+```
+
+#Time and end chemo (figure not included)
+```{r}
+
+D <- M2 %>% filter(ddr_CH==1 & ind_cytotoxic_therapy1==1 & XRT1==0)
+
+p3 <- ggplot(D, aes(x=time_end_cyto1, y=delta_vaf)) +
+  geom_point() +
+  geom_smooth(method=lm , color="red", fill="#69b3a2", se=TRUE) +
+  ylab('Change in VAF') +
+  xlab('Number of days since end of cytotoxic therapy')
+
+p <- D %>% lm(formula = delta_vaf ~ time_end_cyto1 + pct_cytotoxic_therapy1, data = .) %>% tab_model()
+
+do_plot(p3, 'time_serial.png', w = 6, h = 6, save_pdf = T)
+```
+
+#Supp Table 2 tMN cohort descriptive table
+```{r,  fig.width = 3, fig.height = 2.5, dpi = 300}
+
+d <- M_tmn_wide_st %>% mutate(
+  diagnosis=ifelse(post_tmn==1,"tMN","No tMN"))
+
+# Factor the basic variables that
+# we're interested in
+d$diagnosis <- 
+  factor(d$diagnosis, 
+         levels=c("No tMN", "tMN"))
+
+d$Gender <- factor(d$Gender,
+                    levels=c("F", "M"),
+                   labels=c("Female","Male"))
+
+d$VAF_nonsilent_r <- 
+  factor(d$VAF_nonsilent_r, 
+         labels=c("Negative", # Reference
+                  "2-5%", 
+                  "5-10%",
+                  "10-20%",
+                  ">20%"))
+
+label(d$VAF_nonsilent_r) <- "Maximum VAF CH-myeloid PD"
+
+d$n_mut_r <- 
+  factor(d$n_mut_r, 
+         labels=c("Negative", # Reference
+                  "1", 
+                  "2",
+                  "3 or more"))
+
+label(d$n_mut_r) <- "Number of CH-myeloid PD mutations"
+
+d$center <- 
+  factor(d$center, 
+         levels=c("MSK", "MOF", "MDA", "HCC"),
+         labels=c("MSK", # Reference
+                  "MOF", 
+                  "MDA",
+                  "DFC"))
+
+label(d$age) <- "Age"
+label(d$yearslastfu) <- "Years of follow-up"
+label(d$hgb) <- "Hemoglobin"
+label(d$wbc) <- "White Blood Cell Count"
+label(d$plt) <- "Platelet"
+label(d$anc) <- "Absolute Neutrophil Count"
+label(d$mcv) <- "Mean Corpuscular Volume"
+label(d$rdw) <- "Red Cell Distribution Width"
+
+d <- d %>% mutate(generaltumortype=ifelse(generaltumortype=="","Other",generaltumortype))
+label(d$generaltumortype) <- "Primary Tumor Subtype"
+
+p = table1(~ Gender + age + generaltumortype + yearslastfu + hgb + rdw + mcv + wbc + anc + plt + n_mut_r + VAF_nonsilent_r  | center*diagnosis, data=d, overall=F, output="markdown", export="ktab")
+p
+```
+
+#Tabulate tMN analysis
+```{r}
+#Tabulate tMN analysis
+print('All tmn risk set samples')
+table(M_tmn_wide_st$post_tmn)
+#Tabulate paired tMN analysis
+print('All paired samples')
+filter(M_tmn_wide_st,has_serial == 1) %>% nrow()
+print('Time to trans')
+case <- filter(M_tmn_wide_st,has_serial==1)
+psych::describe(case$timelastfu)
+print("Mutation positive at time of CH")
+M_tmn_long %>% filter(has_serial == 1 & VAF_1>0) %>% pull(center_id) %>% unique() %>% length()
+print("Multiple mutations at time of CH")
+testing<- M_tmn_long %>% filter(has_serial == 1 & VAF_1>0) %>% group_by(center_id) %>% summarise(mutnum_ch = length(VAF_1>0))
+filter(testing,mutnum_ch>1) %>% nrow()
+print("Has a TP53 mutation at tMN")
+filter(M_tmn_long,has_serial == 1 & Gene=="TP53" & VAF_2>0) %>% pull(center_id) %>% unique() %>% length()
+print("Has a TP53 mutation and is detectable at CH")
+filter(M_tmn_long,has_serial == 1 & Gene=="TP53" & VAF_1>0) %>% pull(center_id) %>% unique() %>% length()
+print("Among mutation positive, has a TP53 mutation and karyotype abnormal")
+filter(M_tmn_long,has_serial == 1 & Gene=="TP53" & M_tmn_long$karyotype_classification=="abnormal") %>% pull(center_id) %>% unique() %>% length()
+```
+
+#Supp Figure 10 tMN regression combined with healthy
+```{r}
+#Full CH model only including genes present in all studies  
+gene_vars = c("TET2","TP53","U2AF1","SF3B1")
+mut_vars = c("VAF_nonsilent_r","n_mut_r")
+demo_vars = c('age', 'Gender','strata(center)')
+
+D = M_tmn_wide_st
+
+form = paste0(
+    'Surv(timelastfu, post_tmn) ~ ',
+    paste(
+        c(
+            gene_vars,
+            mut_vars,
+            demo_vars
+        ),
+        collapse = ' + '
+    )
+)
+
+cox <- coxph(formula = as.formula(form), data = D, na.action = 'na.omit')
+multi <- cox %>% get_model_data(type="est")
+multi2 <- multi %>% mutate(group=case_when(
+  term %in% gene_vars ~ "Gene",
+  term=="n_mut_r" ~ "Mutation Number",
+  term=="VAF_nonsilent_r" ~ "Maximum VAF"
+))
+multi2 <- multi2 %>% rename(mut_var=term) %>% cbind(study="tMN")
+
+
+#Main effect of CH
+M_tmn_h <- M_tmn_h %>% mutate(center =fct_relevel(center, "PMC", "WSU"))
+
+cox <- coxph(Surv(timelastfu, post_tmn) ~ ch_my_pd + age + Gender + strata(center), data= M_tmn_h, na.action = 'na.omit')
+cox
+
+cox <- coxph(Surv(timelastfu, post_tmn) ~ ch_my_pd*center + age + Gender + strata(center), data=M_tmn_h, na.action = 'na.omit')
+cox
+
+
+#Full model with max VAF and mutation number modeled as continuous
+
+D = M_tmn_h
+
+form = paste0(
+    'Surv(timelastfu, post_tmn) ~ ',
+    paste(
+        c(
+            gene_vars,
+            mut_vars,
+            demo_vars
+        ),
+        collapse = ' + '
+    )
+)
+
+cox <- coxph(formula = as.formula(form), data = D, na.action = 'na.omit')
+multi <- cox %>% get_model_data(type="est")
+multi2_h <- multi %>% mutate(group=case_when(
+  term %in% gene_vars ~ "Gene",
+  term=="n_mut_r" ~ "Mutation Number",
+  term=="VAF_nonsilent_r" ~ "Maximum VAF"
+))
+multi2_h <- multi2_h %>% rename(mut_var=term) %>% cbind(study="Primary AML")
+
+combo <- rbind(multi2_h, multi2)
+
+combo <- combo %>% mutate(mut_var2=case_when(mut_var=="VAF_nonsilent_r" ~ "Maximum VAF",
+                                            mut_var=="n_mut_r" ~ "Mutation Number",
+                                            TRUE ~ as.character(mut_var)))
+
+p <- combo %>%
+plot_forest(
+    x = "mut_var2",
+    fill ="study",
+    col = "study",
+   eb_w = 0,
+      eb_s = 0.3,
+      ps = 1.5,
+      or_s = 2,
+      nudge = -0.5,
+      dodge_width = 0.5)+
+   scale_fill_nejm() +
+scale_color_nejm() +
+ylab('HR') +
+xlab("") +
+facet_grid(group ~ ., scales = "free_y", space = "free_y") +
+#  panel_theme +
+theme(
+    strip.placement = 'top',
+      strip.text = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title = element_text(size = 7),
+    axis.text.x = element_text(size = 7),
+    legend.text = element_text(size=7),
+      legend.title = element_text(size=7)
+)
+
+do_plot(p, "supp_figure_10.png", w = 5, h = 4, save_pdf = T)
+```
